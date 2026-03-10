@@ -32,6 +32,8 @@
             font-weight: bold;
         }
         button:hover { background-color: #004d73; }
+        button.action-btn { background-color: #217346; } /* Excel Green */
+        button.action-btn:hover { background-color: #1a5c38; }
         button.danger { background-color: #cc0000; }
         button.danger:hover { background-color: #990000; }
         
@@ -127,6 +129,7 @@
 
     <div class="toolbar">
         <button onclick="addRow()">+ Add Row</button>
+        <button onclick="insertVariableTemplate()" class="action-btn">+ Add Variable/Array</button>
         <button onclick="syncRAM()">Sync RAM Layout</button>
         <button onclick="clearAll()" class="danger">Clear Sheet</button>
         
@@ -206,7 +209,7 @@
             `;
         }
 
-        function addRow() {
+        function addRow(focusCodeCell = false) {
             const tbody = document.getElementById('grid-body');
             const theadRows = document.getElementById('grid-head').querySelectorAll('tr');
             
@@ -234,6 +237,15 @@
             }
             tbody.appendChild(tr);
             saveState();
+            
+            if (focusCodeCell) tdCode.focus();
+            return tr;
+        }
+
+        function insertVariableTemplate() {
+            let row = addRow(true);
+            row.cells[0].innerText = "new_arr: dw 1, 2, 3";
+            syncRAM(); // Auto sync so they see it immediately
         }
 
         // --- RAM Auto-Parser ---
@@ -243,35 +255,43 @@
             let variables = [];
 
             Array.from(tbody.rows).forEach(row => {
-                let codeText = row.cells[0].innerText.trim();
-                // Regex updated to allow optional colon (e.g. tag1: dw)
-                let varMatch = codeText.match(/^([a-zA-Z_]\w*):?\s+(d[bwd])\s+(.+)$/i);
+                // Split by newline in case they managed to bypass the enter key interceptor
+                let textLines = row.cells[0].innerText.split(/\r?\n/);
                 
-                if (varMatch) {
-                    let name = varMatch[1];
-                    let type = varMatch[2].toLowerCase();
-                    // Split values by commas
-                    let rawVals = varMatch[3].split(/,\s*/).map(v => v.trim()).filter(v => v !== '');
+                textLines.forEach(line => {
+                    let cleanLine = line.split(';')[0].trim(); // Strip comments
+                    // Regex handles optional colon, spaces, db/dw/dd
+                    let varMatch = cleanLine.match(/^\s*([a-zA-Z_]\w*):?\s+(d[bwd])\s+(.+)$/i);
                     
-                    // Parse values to little-endian hex format based on data type
-                    let vals = rawVals.map(v => {
-                        let isHex = v.toLowerCase().startsWith('0x');
-                        let num = parseInt(v, isHex ? 16 : 10);
+                    if (varMatch) {
+                        let name = varMatch[1];
+                        let type = varMatch[2].toLowerCase();
+                        let rawVals = varMatch[3].split(',').map(v => v.trim()).filter(v => v !== '');
                         
-                        if (!isNaN(num)) {
-                            if (type === 'db') {
-                                return num.toString(16).padStart(2, '0').toUpperCase();
-                            } else if (type === 'dw') {
-                                let hexStr = num.toString(16).padStart(4, '0').toUpperCase();
-                                // Swap bytes for Little Endian (e.g., 0001 -> 01 00)
-                                return hexStr.substring(2, 4) + ' ' + hexStr.substring(0, 2);
+                        let vals = rawVals.map(v => {
+                            if (v === '?') return '??'; // Uninitialized
+                            
+                            let isHex = v.toLowerCase().startsWith('0x') || v.toLowerCase().endsWith('h');
+                            let cleanV = v.replace(/h$/i, '').replace(/^0x/i, '');
+                            let num = parseInt(cleanV, isHex ? 16 : 10);
+                            
+                            if (!isNaN(num)) {
+                                if (type === 'db') return num.toString(16).padStart(2, '0').toUpperCase();
+                                if (type === 'dw') {
+                                    let hexStr = num.toString(16).padStart(4, '0').toUpperCase();
+                                    return hexStr.substring(2, 4) + ' ' + hexStr.substring(0, 2);
+                                }
+                                if (type === 'dd') {
+                                    let hexStr = num.toString(16).padStart(8, '0').toUpperCase();
+                                    return hexStr.substring(6, 8) + ' ' + hexStr.substring(4, 6) + ' ' + hexStr.substring(2, 4) + ' ' + hexStr.substring(0, 2);
+                                }
                             }
-                        }
-                        return v; // fallback if it's not a standard number
-                    });
+                            return v; 
+                        });
 
-                    variables.push({ name, type, vals });
-                }
+                        variables.push({ name, type, vals });
+                    }
+                });
             });
 
             buildBaseHeaders();
@@ -287,7 +307,7 @@
                 }
 
                 let thTag = document.createElement('th');
-                thTag.textContent = v.name; // Removed 'dw/db' to match your image precisely
+                thTag.textContent = v.name; 
                 thTag.colSpan = v.vals.length;
                 tr1.appendChild(thTag);
 
@@ -339,18 +359,37 @@
 
         const gridBody = document.getElementById('grid-body');
 
-        // --- Smart Paste (Removes Empty Lines) ---
+        // --- NEW: Excel 'Enter' Key Navigation ---
+        gridBody.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault(); // Stop HTML from making <br> tags
+                
+                let targetCell = e.target;
+                let currentRow = targetCell.closest('tr');
+                let cellIndex = Array.from(currentRow.cells).indexOf(targetCell);
+                
+                let nextRow = currentRow.nextElementSibling;
+                
+                // If we hit Enter on the very last row, make a new one automatically
+                if (!nextRow) {
+                    addRow();
+                    nextRow = currentRow.nextElementSibling;
+                }
+                
+                // Move focus down exactly one cell
+                if (nextRow && nextRow.cells[cellIndex]) {
+                    nextRow.cells[cellIndex].focus();
+                }
+            }
+        });
+
+        // --- Smart Paste ---
         gridBody.addEventListener('paste', function(e) {
             let targetCell = e.target;
-            
             if (targetCell.tagName === 'TD' && targetCell.classList.contains('code-cell')) {
                 e.preventDefault(); 
-                
                 let pasteText = (e.clipboardData || window.clipboardData).getData('text');
-                
-                // Split by newline and filter out empty/blank lines
                 let lines = pasteText.split(/\r?\n/).filter(line => line.trim() !== '');
-
                 let currentRow = targetCell.closest('tr');
 
                 lines.forEach(line => {
@@ -358,14 +397,10 @@
                         addRow();
                         currentRow = gridBody.lastElementChild;
                     }
-
                     let codeCell = currentRow.querySelector('.code-cell');
-                    if (codeCell) {
-                        codeCell.innerText = line;
-                    }
+                    if (codeCell) codeCell.innerText = line;
                     currentRow = currentRow.nextElementSibling;
                 });
-                
                 saveState();
             }
         });
@@ -381,12 +416,10 @@
 
         gridBody.addEventListener('blur', function(e) {
             if(e.target.classList.contains('hex-cell')) {
+                if(e.target.innerText === '??') return; // Ignore uninitialized variables
                 let raw = e.target.innerText.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
                 let formatted = raw.match(/.{1,2}/g)?.join(' ') || '';
-                
-                if(e.target.innerText !== formatted) {
-                    e.target.innerText = formatted;
-                }
+                if(e.target.innerText !== formatted) e.target.innerText = formatted;
             }
             saveState(); 
         }, true); 
