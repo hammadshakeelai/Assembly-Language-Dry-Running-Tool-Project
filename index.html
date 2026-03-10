@@ -32,7 +32,7 @@
             font-weight: bold;
         }
         button:hover { background-color: #004d73; }
-        button.action-btn { background-color: #217346; } /* Excel Green */
+        button.action-btn { background-color: #217346; } 
         button.action-btn:hover { background-color: #1a5c38; }
         button.danger { background-color: #cc0000; }
         button.danger:hover { background-color: #990000; }
@@ -116,13 +116,6 @@
             background-color: #fbfbfb;
             white-space: pre; 
         }
-        .spacer-col {
-            min-width: 15px !important;
-            max-width: 15px !important;
-            background-color: #f0f0f0;
-            border-left: 2px solid #bbb;
-            border-right: 2px solid #bbb;
-        }
     </style>
 </head>
 <body>
@@ -146,7 +139,6 @@
     </div>
 
     <script>
-        // --- Color Palette Setup ---
         const colors = [
             '#ffffff', '#ffff00', '#00ff00', '#00ffff', '#ff99cc', 
             '#ffcc00', '#cc99ff', '#99ccff', '#ff9999', '#ccffcc'
@@ -167,7 +159,6 @@
             picker.appendChild(swatch);
         });
 
-        // --- Save & Load ---
         function saveState() {
             localStorage.setItem('dryRunHead', document.getElementById('grid-head').innerHTML);
             localStorage.setItem('dryRunBody', document.getElementById('grid-body').innerHTML);
@@ -229,10 +220,6 @@
                 let td = document.createElement('td');
                 td.className = 'hex-cell';
                 td.contentEditable = "true";
-                if(theadRows[1] && theadRows[1].cells[i - 5] && theadRows[1].cells[i - 5].classList.contains('spacer-col')) {
-                    td.className = 'spacer-col';
-                    td.contentEditable = "false";
-                }
                 tr.appendChild(td);
             }
             tbody.appendChild(tr);
@@ -245,22 +232,19 @@
         function insertVariableTemplate() {
             let row = addRow(true);
             row.cells[0].innerText = "new_arr: dw 1, 2, 3";
-            syncRAM(); // Auto sync so they see it immediately
+            syncRAM(); 
         }
 
-        // --- RAM Auto-Parser ---
         function syncRAM() {
             const tbody = document.getElementById('grid-body');
             const thead = document.getElementById('grid-head');
             let variables = [];
 
             Array.from(tbody.rows).forEach(row => {
-                // Split by newline in case they managed to bypass the enter key interceptor
                 let textLines = row.cells[0].innerText.split(/\r?\n/);
                 
                 textLines.forEach(line => {
-                    let cleanLine = line.split(';')[0].trim(); // Strip comments
-                    // Regex handles optional colon, spaces, db/dw/dd
+                    let cleanLine = line.split(';')[0].trim(); 
                     let varMatch = cleanLine.match(/^\s*([a-zA-Z_]\w*):?\s+(d[bwd])\s+(.+)$/i);
                     
                     if (varMatch) {
@@ -269,7 +253,7 @@
                         let rawVals = varMatch[3].split(',').map(v => v.trim()).filter(v => v !== '');
                         
                         let vals = rawVals.map(v => {
-                            if (v === '?') return '??'; // Uninitialized
+                            if (v === '?') return '??'; 
                             
                             let isHex = v.toLowerCase().startsWith('0x') || v.toLowerCase().endsWith('h');
                             let cleanV = v.replace(/h$/i, '').replace(/^0x/i, '');
@@ -299,13 +283,7 @@
             let tr2 = thead.rows[1];
             let tr3 = thead.rows[2];
 
-            variables.forEach((v, vIndex) => {
-                if (vIndex > 0) {
-                    tr1.appendChild(createTh('', 3, 'spacer-col'));
-                    tr2.appendChild(createTh('', 1, 'spacer-col'));
-                    tr3.appendChild(createTh('', 1, 'spacer-col'));
-                }
-
+            variables.forEach((v) => {
                 let thTag = document.createElement('th');
                 thTag.textContent = v.name; 
                 thTag.colSpan = v.vals.length;
@@ -319,7 +297,6 @@
 
             let expectedCols = 5; 
             if(variables.length > 0) {
-                expectedCols += (variables.length - 1); 
                 variables.forEach(v => expectedCols += v.vals.length);
             }
 
@@ -332,18 +309,6 @@
                 }
                 while(row.cells.length > expectedCols) {
                     row.deleteCell(-1);
-                }
-                for(let i=5; i<expectedCols; i++) {
-                    if(tr2.cells[i-5] && tr2.cells[i-5].classList.contains('spacer-col')) {
-                        row.cells[i].className = 'spacer-col';
-                        row.cells[i].contentEditable = "false";
-                        row.cells[i].innerText = '';
-                    } else {
-                        if(row.cells[i].classList.contains('spacer-col')) {
-                            row.cells[i].className = 'hex-cell';
-                            row.cells[i].contentEditable = "true";
-                        }
-                    }
                 }
             });
             saveState();
@@ -359,10 +324,10 @@
 
         const gridBody = document.getElementById('grid-body');
 
-        // --- NEW: Excel 'Enter' Key Navigation ---
+        // Excel Enter Key Navigation
         gridBody.addEventListener('keydown', function(e) {
             if (e.key === 'Enter') {
-                e.preventDefault(); // Stop HTML from making <br> tags
+                e.preventDefault(); 
                 
                 let targetCell = e.target;
                 let currentRow = targetCell.closest('tr');
@@ -370,20 +335,18 @@
                 
                 let nextRow = currentRow.nextElementSibling;
                 
-                // If we hit Enter on the very last row, make a new one automatically
                 if (!nextRow) {
                     addRow();
                     nextRow = currentRow.nextElementSibling;
                 }
                 
-                // Move focus down exactly one cell
                 if (nextRow && nextRow.cells[cellIndex]) {
                     nextRow.cells[cellIndex].focus();
                 }
             }
         });
 
-        // --- Smart Paste ---
+        // Smart Paste
         gridBody.addEventListener('paste', function(e) {
             let targetCell = e.target;
             if (targetCell.tagName === 'TD' && targetCell.classList.contains('code-cell')) {
@@ -416,7 +379,7 @@
 
         gridBody.addEventListener('blur', function(e) {
             if(e.target.classList.contains('hex-cell')) {
-                if(e.target.innerText === '??') return; // Ignore uninitialized variables
+                if(e.target.innerText === '??') return; 
                 let raw = e.target.innerText.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
                 let formatted = raw.match(/.{1,2}/g)?.join(' ') || '';
                 if(e.target.innerText !== formatted) e.target.innerText = formatted;
