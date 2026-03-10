@@ -113,6 +113,7 @@
             font-weight: bold;
             min-width: 200px;
             background-color: #fbfbfb;
+            white-space: pre; /* Prevents text from collapsing weirdly */
         }
         .spacer-col {
             min-width: 15px !important;
@@ -147,26 +148,17 @@
     <script>
         // --- High visibility palette ---
         const colors = [
-            '#ffffff', // White (Eraser)
-            '#ffff00', // Yellow
-            '#00ff00', // Lime
-            '#00ffff', // Cyan
-            '#ff99cc', // Pink
-            '#ffcc00', // Orange
-            '#cc99ff', // Purple
-            '#99ccff', // Light Blue
-            '#ff9999', // Salmon
-            '#ccffcc'  // Mint
+            '#ffffff', '#ffff00', '#00ff00', '#00ffff', '#ff99cc', 
+            '#ffcc00', '#cc99ff', '#99ccff', '#ff9999', '#ccffcc'
         ];
         let activeColor = '#ffff00';
 
-        // Initialize color picker
         const picker = document.getElementById('color-picker');
-        colors.forEach((color, index) => {
+        colors.forEach((color) => {
             let swatch = document.createElement('div');
             swatch.className = 'color-swatch' + (color === activeColor ? ' active' : '');
             swatch.style.backgroundColor = color;
-            if(color === '#ffffff') swatch.style.border = '1px solid #ccc'; // So eraser is visible
+            if(color === '#ffffff') swatch.style.border = '1px solid #ccc';
             swatch.onclick = () => {
                 document.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
                 swatch.classList.add('active');
@@ -175,7 +167,6 @@
             picker.appendChild(swatch);
         });
 
-        // --- Save & Load State ---
         function saveState() {
             localStorage.setItem('dryRunHead', document.getElementById('grid-head').innerHTML);
             localStorage.setItem('dryRunBody', document.getElementById('grid-body').innerHTML);
@@ -202,7 +193,6 @@
             }
         }
 
-        // --- Table Building Logic ---
         function buildBaseHeaders() {
             const thead = document.getElementById('grid-head');
             thead.innerHTML = `
@@ -222,10 +212,11 @@
             const tbody = document.getElementById('grid-body');
             const theadRows = document.getElementById('grid-head').querySelectorAll('tr');
             
-            // Calculate total columns based on the first header row + sub headers
-            let colCount = 1 + 4; // Code + Registers
-            let headerCells = theadRows[1].querySelectorAll('th');
-            colCount += headerCells.length; // Add dynamic memory columns
+            let colCount = 1 + 4; 
+            if(theadRows.length > 1) {
+                let headerCells = theadRows[1].querySelectorAll('th');
+                colCount += headerCells.length;
+            }
 
             let tr = document.createElement('tr');
             
@@ -238,8 +229,7 @@
                 let td = document.createElement('td');
                 td.className = 'hex-cell';
                 td.contentEditable = "true";
-                // If the corresponding column is a spacer, apply the class
-                if(theadRows[1].cells[i - 5] && theadRows[1].cells[i - 5].classList.contains('spacer-col')) {
+                if(theadRows[1] && theadRows[1].cells[i - 5] && theadRows[1].cells[i - 5].classList.contains('spacer-col')) {
                     td.className = 'spacer-col';
                     td.contentEditable = "false";
                 }
@@ -249,13 +239,11 @@
             saveState();
         }
 
-        // --- Core Feature: Parse Code & Build RAM ---
         function syncRAM() {
             const tbody = document.getElementById('grid-body');
             const thead = document.getElementById('grid-head');
             let variables = [];
 
-            // 1. Scan code column for arrays
             Array.from(tbody.rows).forEach(row => {
                 let codeText = row.cells[0].innerText.trim();
                 let varMatch = codeText.match(/^([a-zA-Z_]\w*)\s+(d[bwd])\s+(.+)$/i);
@@ -267,14 +255,12 @@
                 }
             });
 
-            // 2. Rebuild headers
             buildBaseHeaders();
-            let tr1 = thead.rows[0]; // Main Tags
-            let tr2 = thead.rows[1]; // Values
-            let tr3 = thead.rows[2]; // Indices
+            let tr1 = thead.rows[0];
+            let tr2 = thead.rows[1];
+            let tr3 = thead.rows[2];
 
             variables.forEach((v, vIndex) => {
-                // Spacer column between arrays (skip for the first one)
                 if (vIndex > 0) {
                     tr1.appendChild(createTh('', 3, 'spacer-col'));
                     tr2.appendChild(createTh('', 1, 'spacer-col'));
@@ -292,10 +278,8 @@
                 });
             });
 
-            // 3. Align existing rows to new column count
-            let expectedCols = 5; // Code + 4 Regs
+            let expectedCols = 5; 
             if(variables.length > 0) {
-                // Add spacer counts and value counts
                 expectedCols += (variables.length - 1); 
                 variables.forEach(v => expectedCols += v.vals.length);
             }
@@ -310,9 +294,8 @@
                 while(row.cells.length > expectedCols) {
                     row.deleteCell(-1);
                 }
-                // Re-apply spacer styling to correct columns
                 for(let i=5; i<expectedCols; i++) {
-                    if(tr2.cells[i-5].classList.contains('spacer-col')) {
+                    if(tr2.cells[i-5] && tr2.cells[i-5].classList.contains('spacer-col')) {
                         row.cells[i].className = 'spacer-col';
                         row.cells[i].contentEditable = "false";
                         row.cells[i].innerText = '';
@@ -335,22 +318,53 @@
             return th;
         }
 
-        // --- Event Listeners for Formatting and Coloring ---
         const gridBody = document.getElementById('grid-body');
 
-        // Apply Color on Double Click
-        gridBody.addEventListener('dblclick', function(e) {
-            if(e.target.tagName === 'TD') {
-                e.target.style.backgroundColor = activeColor;
-                window.getSelection().removeAllRanges(); // Clear text highlight
+        // --- NEW: Excel-like Paste Interception ---
+        gridBody.addEventListener('paste', function(e) {
+            let targetCell = e.target;
+            
+            // Only intercept if pasting into the Code column
+            if (targetCell.tagName === 'TD' && targetCell.classList.contains('code-cell')) {
+                e.preventDefault(); // Stop default HTML dumping
+                
+                // Get pasted text and split into an array of lines
+                let pasteText = (e.clipboardData || window.clipboardData).getData('text');
+                let lines = pasteText.split(/\r?\n/);
+
+                let currentRow = targetCell.closest('tr');
+
+                lines.forEach(line => {
+                    // If we run out of rows while pasting, automatically create a new one
+                    if (!currentRow) {
+                        addRow();
+                        currentRow = gridBody.lastElementChild;
+                    }
+
+                    // Put the line of code into the cell
+                    let codeCell = currentRow.querySelector('.code-cell');
+                    if (codeCell) {
+                        codeCell.innerText = line;
+                    }
+
+                    // Move down to the next row for the next line
+                    currentRow = currentRow.nextElementSibling;
+                });
+                
                 saveState();
             }
         });
 
-        // Auto-Format Hex on Blur (when clicking out of a cell)
+        gridBody.addEventListener('dblclick', function(e) {
+            if(e.target.tagName === 'TD' && e.target.contentEditable === "true") {
+                e.target.style.backgroundColor = activeColor;
+                window.getSelection().removeAllRanges(); 
+                saveState();
+            }
+        });
+
         gridBody.addEventListener('blur', function(e) {
             if(e.target.classList.contains('hex-cell')) {
-                // Force to Hex format: Strip all non-hex, capitalize, group by 2 with spaces
                 let raw = e.target.innerText.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
                 let formatted = raw.match(/.{1,2}/g)?.join(' ') || '';
                 
@@ -358,10 +372,9 @@
                     e.target.innerText = formatted;
                 }
             }
-            saveState(); // Save state anytime the user types something
-        }, true); // Capture phase so it triggers reliably on contenteditable
+            saveState(); 
+        }, true); 
 
-        // Load data on start
         window.onload = loadState;
 
     </script>
