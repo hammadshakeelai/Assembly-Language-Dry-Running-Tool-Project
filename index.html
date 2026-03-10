@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Assembly Dry Run Formatter</title>
+    <title>Assembly Dry Run Setup Generator</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -17,6 +17,22 @@
             display: flex;
             flex-direction: column;
             min-width: 300px;
+        }
+        .toolbar {
+            margin-bottom: 10px;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #006699;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        button:hover {
+            background-color: #004d73;
         }
         textarea {
             width: 100%;
@@ -38,10 +54,11 @@
             border: 1px solid #ccc;
             border-radius: 4px;
             padding: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
         }
         table {
             border-collapse: collapse;
-            width: max-content; /* Allows table to stretch based on dynamic columns */
+            width: max-content;
             font-family: 'Courier New', Courier, monospace;
             font-size: 16px;
         }
@@ -50,6 +67,7 @@
             padding: 8px 12px;
             text-align: center;
             min-width: 60px;
+            height: 24px;
         }
         th {
             background-color: #f0f0f0;
@@ -61,21 +79,39 @@
             color: #006699; 
             font-weight: bold;
             white-space: nowrap;
+            background-color: #fafafa;
+            user-select: none;
+        }
+        /* Excel-like interaction styling */
+        td[contenteditable="true"] {
+            outline: none;
+            cursor: text;
+        }
+        td[contenteditable="true"]:focus {
+            outline: 2px solid #217346; /* Excel green outline */
+            background-color: #f4fff8;
         }
         .highlight {
-            background-color: #ffff00;
+            background-color: #ffff00 !important;
         }
         .sub-header {
             background-color: #fafafa;
             color: #666;
             font-size: 14px;
         }
+        .instructions {
+            font-size: 14px;
+            color: #555;
+            margin-bottom: 15px;
+        }
     </style>
 </head>
 <body>
 
     <div class="editor-pane">
-        <h3>Assembly Code</h3>
+        <div class="toolbar">
+            <button onclick="generateSetup()">Generate Sheet</button>
+        </div>
         <textarea id="asm-code" spellcheck="false">
 [org 0x0100]
 
@@ -83,17 +119,16 @@ tag db 00 01, 01 04, 08 00
 
 mov ax, 2
 mov bx, 2
-mov cx, 10
 add ax, bx
-add cx, ax
-mov dx, cx
 
 mov ax, 0x4c00
 int 0x21</textarea>
     </div>
 
     <div class="grid-pane">
-        <h3>Dry Run Grid</h3>
+        <div class="instructions">
+            <strong>How to use:</strong> Click any cell to type. <strong>Double-click</strong> a cell to highlight it yellow.
+        </div>
         <table id="output-grid">
             <thead id="grid-head">
                 </thead>
@@ -103,12 +138,7 @@ int 0x21</textarea>
     </div>
 
     <script>
-        function formatHex(num) {
-            let hexStr = num.toString(16).padStart(4, '0').toUpperCase();
-            return hexStr.substring(0, 2) + ' ' + hexStr.substring(2, 4);
-        }
-
-        function parseAssembly() {
+        function generateSetup() {
             const code = document.getElementById('asm-code').value;
             const lines = code.split('\n');
             const thead = document.getElementById('grid-head');
@@ -117,10 +147,9 @@ int 0x21</textarea>
             thead.innerHTML = '';
             tbody.innerHTML = '';
 
-            let regs = { ax: 0, bx: 0, cx: 0, dx: 0 };
             let variables = [];
 
-            // --- PASS 1: Find variables to build dynamic columns ---
+            // --- Find variables to build dynamic columns ---
             lines.forEach(line => {
                 let cleanLine = line.split(';')[0].trim();
                 let varMatch = cleanLine.match(/^([a-zA-Z_]\w*)\s+(d[bwd])\s+(.+)$/i);
@@ -128,7 +157,6 @@ int 0x21</textarea>
                 if (varMatch) {
                     let name = varMatch[1];
                     let type = varMatch[2].toLowerCase();
-                    // Split values by comma or multiple spaces
                     let vals = varMatch[3].split(/,\s*|\s{2,}/).map(v => v.trim());
                     variables.push({ name, type, vals });
                 }
@@ -136,14 +164,14 @@ int 0x21</textarea>
 
             // --- BUILD HEADERS ---
             let trHead1 = document.createElement('tr');
-            let trHead2 = document.createElement('tr'); // For the 0, 1, 2 indices
+            let trHead2 = document.createElement('tr'); 
             trHead2.className = 'sub-header';
 
             // Fixed columns
             ['Instruction', 'ax', 'bx', 'cx', 'dx'].forEach(text => {
                 let th = document.createElement('th');
                 th.textContent = text;
-                th.rowSpan = 2; // Span across the sub-header row
+                th.rowSpan = 2; 
                 trHead1.appendChild(th);
             });
 
@@ -160,7 +188,7 @@ int 0x21</textarea>
                     trHead1.appendChild(thVal);
 
                     let thIdx = document.createElement('th');
-                    thIdx.textContent = index; // The 0, 1, 2 beneath the values
+                    thIdx.textContent = index; 
                     trHead2.appendChild(thIdx);
                 });
             });
@@ -168,86 +196,54 @@ int 0x21</textarea>
             thead.appendChild(trHead1);
             thead.appendChild(trHead2);
 
-            // --- PASS 2: Execute code and build rows ---
-            // Initial state row (optional, matching your screenshot's row 8)
-            let trInit = document.createElement('tr');
-            trInit.innerHTML = `<td></td><td>00 00</td><td>00 00</td><td>00 00</td><td>00 00</td>` + 
-                               variables.map(v => `<td></td>` + v.vals.map(() => `<td></td>`).join('')).join('');
-            tbody.appendChild(trInit);
-
+            // Calculate total columns for formatting purposes
+            const totalDynamicCols = variables.reduce((acc, v) => acc + 1 + v.vals.length, 0);
+            
+            // --- BUILD EMPTY ROWS FOR INSTRUCTIONS ---
             lines.forEach(line => {
-                let cleanLine = line.split(';')[0].trim().toLowerCase();
+                let cleanLine = line.split(';')[0].trim();
+                let tr = document.createElement('tr');
+                
+                let tdCode = document.createElement('td');
+                tdCode.className = 'code-cell';
+                tdCode.textContent = line;
+                
+                // If it's empty or a directive, just span the whole row
                 if (!cleanLine || cleanLine.startsWith('[') || cleanLine.includes(' db ') || cleanLine.includes(' dw ')) {
-                    // It's a directive, empty line, or variable declaration - just print the code
                     if (line.trim() !== '') {
-                        let tr = document.createElement('tr');
-                        let tdCode = document.createElement('td');
-                        tdCode.className = 'code-cell';
-                        tdCode.textContent = line;
-                        tdCode.colSpan = 5 + variables.reduce((acc, v) => acc + 1 + v.vals.length, 0); // Span entire table
+                        tdCode.colSpan = 5 + totalDynamicCols; 
                         tr.appendChild(tdCode);
                         tbody.appendChild(tr);
                     }
                     return; 
                 }
 
-                let prevRegs = { ...regs };
-                let changedReg = null;
-
-                // Parse MOV
-                let movMatch = cleanLine.match(/mov\s+(ax|bx|cx|dx)\s*,\s*(.+)/);
-                if (movMatch) {
-                    let reg = movMatch[1];
-                    let valStr = movMatch[2];
-                    
-                    // Check if moving from another register
-                    if (['ax', 'bx', 'cx', 'dx'].includes(valStr)) {
-                        regs[reg] = regs[valStr];
-                    } else {
-                        let val = valStr.startsWith('0x') ? parseInt(valStr, 16) : parseInt(valStr, 10);
-                        if (!isNaN(val)) regs[reg] = val;
-                    }
-                    changedReg = reg;
-                }
-                
-                // Parse ADD
-                let addMatch = cleanLine.match(/add\s+(ax|bx|cx|dx)\s*,\s*(ax|bx|cx|dx)/);
-                if (addMatch) {
-                    let destReg = addMatch[1];
-                    let srcReg = addMatch[2];
-                    regs[destReg] = (regs[destReg] + regs[srcReg]) & 0xFFFF; 
-                    changedReg = destReg;
-                }
-
-                // Render execution row
-                let tr = document.createElement('tr');
-                
-                let tdCode = document.createElement('td');
-                tdCode.className = 'code-cell';
-                tdCode.textContent = line;
+                // If it's actual code, create the editable cells
                 tr.appendChild(tdCode);
 
-                ['ax', 'bx', 'cx', 'dx'].forEach(reg => {
+                // 4 registers + all dynamic columns
+                const emptyCellsNeeded = 4 + totalDynamicCols;
+                for(let i = 0; i < emptyCellsNeeded; i++) {
                     let td = document.createElement('td');
-                    td.textContent = formatHex(regs[reg]);
-                    if (changedReg === reg) td.className = 'highlight';
+                    td.contentEditable = "true"; // Makes it behave like Excel
                     tr.appendChild(td);
-                });
-
-                // Add empty cells for the dynamic memory columns to keep alignment
-                variables.forEach(v => {
-                    tr.appendChild(document.createElement('td')); // For the 'tag db' column
-                    v.vals.forEach(() => {
-                        tr.appendChild(document.createElement('td')); // For the value columns
-                    });
-                });
+                }
 
                 tbody.appendChild(tr);
             });
         }
 
-        document.getElementById('asm-code').addEventListener('input', parseAssembly);
-        parseAssembly();
+        // Toggle yellow highlight on double click
+        document.getElementById('grid-body').addEventListener('dblclick', function(e) {
+            if(e.target.tagName === 'TD' && e.target.hasAttribute('contenteditable')) {
+                e.target.classList.toggle('highlight');
+                // Clear text selection that happens on double click
+                window.getSelection().removeAllRanges(); 
+            }
+        });
+
+        // Generate the initial sheet on load
+        generateSetup();
     </script>
 </body>
 </html>
