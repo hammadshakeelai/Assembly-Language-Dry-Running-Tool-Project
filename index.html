@@ -35,7 +35,6 @@
         button.danger { background-color: #cc0000; }
         button.danger:hover { background-color: #990000; }
         
-        /* Color Picker Styles */
         .color-picker {
             display: flex;
             gap: 5px;
@@ -113,7 +112,7 @@
             font-weight: bold;
             min-width: 200px;
             background-color: #fbfbfb;
-            white-space: pre; /* Prevents text from collapsing weirdly */
+            white-space: pre; 
         }
         .spacer-col {
             min-width: 15px !important;
@@ -133,20 +132,18 @@
         
         <div class="color-picker" id="color-picker">
             <span style="font-size: 14px; font-weight: bold; margin-right: 5px;">Highlighter:</span>
-            </div>
+        </div>
     </div>
 
     <div class="grid-container">
         <table id="output-grid">
-            <thead id="grid-head">
-                </thead>
-            <tbody id="grid-body">
-                </tbody>
+            <thead id="grid-head"></thead>
+            <tbody id="grid-body"></tbody>
         </table>
     </div>
 
     <script>
-        // --- High visibility palette ---
+        // --- Color Palette Setup ---
         const colors = [
             '#ffffff', '#ffff00', '#00ff00', '#00ffff', '#ff99cc', 
             '#ffcc00', '#cc99ff', '#99ccff', '#ff9999', '#ccffcc'
@@ -167,6 +164,7 @@
             picker.appendChild(swatch);
         });
 
+        // --- Save & Load ---
         function saveState() {
             localStorage.setItem('dryRunHead', document.getElementById('grid-head').innerHTML);
             localStorage.setItem('dryRunBody', document.getElementById('grid-body').innerHTML);
@@ -219,7 +217,6 @@
             }
 
             let tr = document.createElement('tr');
-            
             let tdCode = document.createElement('td');
             tdCode.className = 'code-cell';
             tdCode.contentEditable = "true";
@@ -239,6 +236,7 @@
             saveState();
         }
 
+        // --- RAM Auto-Parser ---
         function syncRAM() {
             const tbody = document.getElementById('grid-body');
             const thead = document.getElementById('grid-head');
@@ -246,11 +244,32 @@
 
             Array.from(tbody.rows).forEach(row => {
                 let codeText = row.cells[0].innerText.trim();
-                let varMatch = codeText.match(/^([a-zA-Z_]\w*)\s+(d[bwd])\s+(.+)$/i);
+                // Regex updated to allow optional colon (e.g. tag1: dw)
+                let varMatch = codeText.match(/^([a-zA-Z_]\w*):?\s+(d[bwd])\s+(.+)$/i);
+                
                 if (varMatch) {
                     let name = varMatch[1];
                     let type = varMatch[2].toLowerCase();
-                    let vals = varMatch[3].split(/,\s*|\s+/).map(v => v.trim()).filter(v => v !== '');
+                    // Split values by commas
+                    let rawVals = varMatch[3].split(/,\s*/).map(v => v.trim()).filter(v => v !== '');
+                    
+                    // Parse values to little-endian hex format based on data type
+                    let vals = rawVals.map(v => {
+                        let isHex = v.toLowerCase().startsWith('0x');
+                        let num = parseInt(v, isHex ? 16 : 10);
+                        
+                        if (!isNaN(num)) {
+                            if (type === 'db') {
+                                return num.toString(16).padStart(2, '0').toUpperCase();
+                            } else if (type === 'dw') {
+                                let hexStr = num.toString(16).padStart(4, '0').toUpperCase();
+                                // Swap bytes for Little Endian (e.g., 0001 -> 01 00)
+                                return hexStr.substring(2, 4) + ' ' + hexStr.substring(0, 2);
+                            }
+                        }
+                        return v; // fallback if it's not a standard number
+                    });
+
                     variables.push({ name, type, vals });
                 }
             });
@@ -268,7 +287,7 @@
                 }
 
                 let thTag = document.createElement('th');
-                thTag.textContent = `${v.name} ${v.type}`;
+                thTag.textContent = v.name; // Removed 'dw/db' to match your image precisely
                 thTag.colSpan = v.vals.length;
                 tr1.appendChild(thTag);
 
@@ -320,34 +339,30 @@
 
         const gridBody = document.getElementById('grid-body');
 
-        // --- NEW: Excel-like Paste Interception ---
+        // --- Smart Paste (Removes Empty Lines) ---
         gridBody.addEventListener('paste', function(e) {
             let targetCell = e.target;
             
-            // Only intercept if pasting into the Code column
             if (targetCell.tagName === 'TD' && targetCell.classList.contains('code-cell')) {
-                e.preventDefault(); // Stop default HTML dumping
+                e.preventDefault(); 
                 
-                // Get pasted text and split into an array of lines
                 let pasteText = (e.clipboardData || window.clipboardData).getData('text');
-                let lines = pasteText.split(/\r?\n/);
+                
+                // Split by newline and filter out empty/blank lines
+                let lines = pasteText.split(/\r?\n/).filter(line => line.trim() !== '');
 
                 let currentRow = targetCell.closest('tr');
 
                 lines.forEach(line => {
-                    // If we run out of rows while pasting, automatically create a new one
                     if (!currentRow) {
                         addRow();
                         currentRow = gridBody.lastElementChild;
                     }
 
-                    // Put the line of code into the cell
                     let codeCell = currentRow.querySelector('.code-cell');
                     if (codeCell) {
                         codeCell.innerText = line;
                     }
-
-                    // Move down to the next row for the next line
                     currentRow = currentRow.nextElementSibling;
                 });
                 
@@ -355,6 +370,7 @@
             }
         });
 
+        // Coloring & Formatting
         gridBody.addEventListener('dblclick', function(e) {
             if(e.target.tagName === 'TD' && e.target.contentEditable === "true") {
                 e.target.style.backgroundColor = activeColor;
@@ -376,7 +392,6 @@
         }, true); 
 
         window.onload = loadState;
-
     </script>
 </body>
 </html>
