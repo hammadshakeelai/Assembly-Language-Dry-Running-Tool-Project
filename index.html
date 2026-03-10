@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assembly Dry Run Formatter</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 20px;
+            display: flex;
+            gap: 20px;
+            background-color: #f9f9f9;
+        }
+        .editor-pane {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        textarea {
+            width: 100%;
+            height: 400px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 16px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            resize: none;
+        }
+        .grid-pane {
+            flex: 2;
+            overflow-x: auto;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            background-color: white;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 16px;
+        }
+        th, td {
+            border: 1px solid #d4d4d4;
+            padding: 8px 12px;
+            text-align: center;
+        }
+        th {
+            background-color: #f0f0f0;
+            font-weight: normal;
+            color: #333;
+        }
+        td.code-cell {
+            text-align: left;
+            color: #006699; /* Matches the blue text from your image */
+            font-weight: bold;
+        }
+        .highlight {
+            background-color: #ffff00; /* Yellow highlight */
+        }
+    </style>
+</head>
+<body>
+
+    <div class="editor-pane">
+        <h3>Assembly Code</h3>
+        <textarea id="asm-code">
+[org 0x0100]
+mov ax, 2
+mov bx, 2
+add ax, bx
+mov ax, 0x4c00
+int 0x21</textarea>
+    </div>
+
+    <div class="grid-pane">
+        <h3>Dry Run Grid</h3>
+        <table id="output-grid">
+            <thead>
+                <tr>
+                    <th>Instruction</th>
+                    <th>ax</th>
+                    <th>bx</th>
+                </tr>
+            </thead>
+            <tbody id="grid-body">
+                </tbody>
+        </table>
+    </div>
+
+    <script>
+        // Helper function to format numbers as "00 00" hex strings
+        function formatHex(num) {
+            let hexStr = num.toString(16).padStart(4, '0').toUpperCase();
+            return hexStr.substring(0, 2) + ' ' + hexStr.substring(2, 4);
+        }
+
+        function parseAssembly() {
+            const code = document.getElementById('asm-code').value;
+            const lines = code.split('\n');
+            const tbody = document.getElementById('grid-body');
+            
+            // Clear previous table rows
+            tbody.innerHTML = '';
+
+            // Initialize registers as integers
+            let regs = { ax: 0, bx: 0 };
+
+            lines.forEach(line => {
+                let trimmedLine = line.trim().toLowerCase();
+                let cleanLine = trimmedLine.split(';')[0].trim(); // Ignore comments
+                
+                // Store previous state to detect changes for highlighting
+                let prevRegs = { ...regs };
+                let changedReg = null;
+
+                // 1. Parse MOV instructions
+                if (cleanLine.startsWith('mov')) {
+                    // Regex to extract register and value: mov ax, 2 or mov ax, 0x4c00
+                    let match = cleanLine.match(/mov\s+(ax|bx)\s*,\s*(.+)/);
+                    if (match) {
+                        let reg = match[1];
+                        let valStr = match[2];
+                        
+                        // Handle Hex (0x) or Decimal parsing
+                        let val = valStr.startsWith('0x') ? parseInt(valStr, 16) : parseInt(valStr, 10);
+                        
+                        if (!isNaN(val)) {
+                            regs[reg] = val;
+                            changedReg = reg;
+                        }
+                    }
+                }
+                
+                // 2. Parse ADD instructions
+                else if (cleanLine.startsWith('add')) {
+                    // Regex to extract register 1 and register 2: add ax, bx
+                    let match = cleanLine.match(/add\s+(ax|bx)\s*,\s*(ax|bx)/);
+                    if (match) {
+                        let destReg = match[1];
+                        let srcReg = match[2];
+                        
+                        regs[destReg] += regs[srcReg];
+                        
+                        // Handle 16-bit overflow (keep it within FFFF)
+                        regs[destReg] = regs[destReg] & 0xFFFF; 
+                        changedReg = destReg;
+                    }
+                }
+
+                // Create the HTML row
+                let tr = document.createElement('tr');
+                
+                // Code Column
+                let tdCode = document.createElement('td');
+                tdCode.className = 'code-cell';
+                tdCode.textContent = line; // Show original formatting
+                tr.appendChild(tdCode);
+
+                // AX Column
+                let tdAx = document.createElement('td');
+                tdAx.textContent = formatHex(regs.ax);
+                if (changedReg === 'ax') tdAx.className = 'highlight';
+                tr.appendChild(tdAx);
+
+                // BX Column
+                let tdBx = document.createElement('td');
+                tdBx.textContent = formatHex(regs.bx);
+                if (changedReg === 'bx') tdBx.className = 'highlight';
+                tr.appendChild(tdBx);
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        // Run the parser whenever the user types
+        document.getElementById('asm-code').addEventListener('input', parseAssembly);
+
+        // Run once on load to populate the initial table
+        parseAssembly();
+    </script>
+</body>
+</html>
