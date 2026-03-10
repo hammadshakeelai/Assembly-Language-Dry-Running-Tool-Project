@@ -16,25 +16,32 @@
             flex: 1;
             display: flex;
             flex-direction: column;
+            min-width: 300px;
         }
         textarea {
             width: 100%;
-            height: 400px;
+            height: 500px;
             font-family: 'Courier New', Courier, monospace;
             font-size: 16px;
             padding: 10px;
             border: 1px solid #ccc;
             border-radius: 4px;
             resize: none;
+            white-space: pre;
+            overflow-wrap: normal;
+            overflow-x: auto;
         }
         .grid-pane {
             flex: 2;
             overflow-x: auto;
+            background-color: white;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 10px;
         }
         table {
             border-collapse: collapse;
-            width: 100%;
-            background-color: white;
+            width: max-content; /* Allows table to stretch based on dynamic columns */
             font-family: 'Courier New', Courier, monospace;
             font-size: 16px;
         }
@@ -42,6 +49,7 @@
             border: 1px solid #d4d4d4;
             padding: 8px 12px;
             text-align: center;
+            min-width: 60px;
         }
         th {
             background-color: #f0f0f0;
@@ -50,11 +58,17 @@
         }
         td.code-cell {
             text-align: left;
-            color: #006699; /* Matches the blue text from your image */
+            color: #006699; 
             font-weight: bold;
+            white-space: nowrap;
         }
         .highlight {
-            background-color: #ffff00; /* Yellow highlight */
+            background-color: #ffff00;
+        }
+        .sub-header {
+            background-color: #fafafa;
+            color: #666;
+            font-size: 14px;
         }
     </style>
 </head>
@@ -62,11 +76,18 @@
 
     <div class="editor-pane">
         <h3>Assembly Code</h3>
-        <textarea id="asm-code">
+        <textarea id="asm-code" spellcheck="false">
 [org 0x0100]
+
+tag db 00 01, 01 04, 08 00
+
 mov ax, 2
 mov bx, 2
+mov cx, 10
 add ax, bx
+add cx, ax
+mov dx, cx
+
 mov ax, 0x4c00
 int 0x21</textarea>
     </div>
@@ -74,20 +95,14 @@ int 0x21</textarea>
     <div class="grid-pane">
         <h3>Dry Run Grid</h3>
         <table id="output-grid">
-            <thead>
-                <tr>
-                    <th>Instruction</th>
-                    <th>ax</th>
-                    <th>bx</th>
-                </tr>
-            </thead>
+            <thead id="grid-head">
+                </thead>
             <tbody id="grid-body">
                 </tbody>
         </table>
     </div>
 
     <script>
-        // Helper function to format numbers as "00 00" hex strings
         function formatHex(num) {
             let hexStr = num.toString(16).padStart(4, '0').toUpperCase();
             return hexStr.substring(0, 2) + ' ' + hexStr.substring(2, 4);
@@ -96,85 +111,142 @@ int 0x21</textarea>
         function parseAssembly() {
             const code = document.getElementById('asm-code').value;
             const lines = code.split('\n');
+            const thead = document.getElementById('grid-head');
             const tbody = document.getElementById('grid-body');
             
-            // Clear previous table rows
+            thead.innerHTML = '';
             tbody.innerHTML = '';
 
-            // Initialize registers as integers
-            let regs = { ax: 0, bx: 0 };
+            let regs = { ax: 0, bx: 0, cx: 0, dx: 0 };
+            let variables = [];
+
+            // --- PASS 1: Find variables to build dynamic columns ---
+            lines.forEach(line => {
+                let cleanLine = line.split(';')[0].trim();
+                let varMatch = cleanLine.match(/^([a-zA-Z_]\w*)\s+(d[bwd])\s+(.+)$/i);
+                
+                if (varMatch) {
+                    let name = varMatch[1];
+                    let type = varMatch[2].toLowerCase();
+                    // Split values by comma or multiple spaces
+                    let vals = varMatch[3].split(/,\s*|\s{2,}/).map(v => v.trim());
+                    variables.push({ name, type, vals });
+                }
+            });
+
+            // --- BUILD HEADERS ---
+            let trHead1 = document.createElement('tr');
+            let trHead2 = document.createElement('tr'); // For the 0, 1, 2 indices
+            trHead2.className = 'sub-header';
+
+            // Fixed columns
+            ['Instruction', 'ax', 'bx', 'cx', 'dx'].forEach(text => {
+                let th = document.createElement('th');
+                th.textContent = text;
+                th.rowSpan = 2; // Span across the sub-header row
+                trHead1.appendChild(th);
+            });
+
+            // Dynamic memory columns
+            variables.forEach(v => {
+                let thVarName = document.createElement('th');
+                thVarName.textContent = `${v.name} ${v.type}`;
+                thVarName.rowSpan = 2;
+                trHead1.appendChild(thVarName);
+
+                v.vals.forEach((val, index) => {
+                    let thVal = document.createElement('th');
+                    thVal.textContent = val;
+                    trHead1.appendChild(thVal);
+
+                    let thIdx = document.createElement('th');
+                    thIdx.textContent = index; // The 0, 1, 2 beneath the values
+                    trHead2.appendChild(thIdx);
+                });
+            });
+
+            thead.appendChild(trHead1);
+            thead.appendChild(trHead2);
+
+            // --- PASS 2: Execute code and build rows ---
+            // Initial state row (optional, matching your screenshot's row 8)
+            let trInit = document.createElement('tr');
+            trInit.innerHTML = `<td></td><td>00 00</td><td>00 00</td><td>00 00</td><td>00 00</td>` + 
+                               variables.map(v => `<td></td>` + v.vals.map(() => `<td></td>`).join('')).join('');
+            tbody.appendChild(trInit);
 
             lines.forEach(line => {
-                let trimmedLine = line.trim().toLowerCase();
-                let cleanLine = trimmedLine.split(';')[0].trim(); // Ignore comments
-                
-                // Store previous state to detect changes for highlighting
+                let cleanLine = line.split(';')[0].trim().toLowerCase();
+                if (!cleanLine || cleanLine.startsWith('[') || cleanLine.includes(' db ') || cleanLine.includes(' dw ')) {
+                    // It's a directive, empty line, or variable declaration - just print the code
+                    if (line.trim() !== '') {
+                        let tr = document.createElement('tr');
+                        let tdCode = document.createElement('td');
+                        tdCode.className = 'code-cell';
+                        tdCode.textContent = line;
+                        tdCode.colSpan = 5 + variables.reduce((acc, v) => acc + 1 + v.vals.length, 0); // Span entire table
+                        tr.appendChild(tdCode);
+                        tbody.appendChild(tr);
+                    }
+                    return; 
+                }
+
                 let prevRegs = { ...regs };
                 let changedReg = null;
 
-                // 1. Parse MOV instructions
-                if (cleanLine.startsWith('mov')) {
-                    // Regex to extract register and value: mov ax, 2 or mov ax, 0x4c00
-                    let match = cleanLine.match(/mov\s+(ax|bx)\s*,\s*(.+)/);
-                    if (match) {
-                        let reg = match[1];
-                        let valStr = match[2];
-                        
-                        // Handle Hex (0x) or Decimal parsing
+                // Parse MOV
+                let movMatch = cleanLine.match(/mov\s+(ax|bx|cx|dx)\s*,\s*(.+)/);
+                if (movMatch) {
+                    let reg = movMatch[1];
+                    let valStr = movMatch[2];
+                    
+                    // Check if moving from another register
+                    if (['ax', 'bx', 'cx', 'dx'].includes(valStr)) {
+                        regs[reg] = regs[valStr];
+                    } else {
                         let val = valStr.startsWith('0x') ? parseInt(valStr, 16) : parseInt(valStr, 10);
-                        
-                        if (!isNaN(val)) {
-                            regs[reg] = val;
-                            changedReg = reg;
-                        }
+                        if (!isNaN(val)) regs[reg] = val;
                     }
+                    changedReg = reg;
                 }
                 
-                // 2. Parse ADD instructions
-                else if (cleanLine.startsWith('add')) {
-                    // Regex to extract register 1 and register 2: add ax, bx
-                    let match = cleanLine.match(/add\s+(ax|bx)\s*,\s*(ax|bx)/);
-                    if (match) {
-                        let destReg = match[1];
-                        let srcReg = match[2];
-                        
-                        regs[destReg] += regs[srcReg];
-                        
-                        // Handle 16-bit overflow (keep it within FFFF)
-                        regs[destReg] = regs[destReg] & 0xFFFF; 
-                        changedReg = destReg;
-                    }
+                // Parse ADD
+                let addMatch = cleanLine.match(/add\s+(ax|bx|cx|dx)\s*,\s*(ax|bx|cx|dx)/);
+                if (addMatch) {
+                    let destReg = addMatch[1];
+                    let srcReg = addMatch[2];
+                    regs[destReg] = (regs[destReg] + regs[srcReg]) & 0xFFFF; 
+                    changedReg = destReg;
                 }
 
-                // Create the HTML row
+                // Render execution row
                 let tr = document.createElement('tr');
                 
-                // Code Column
                 let tdCode = document.createElement('td');
                 tdCode.className = 'code-cell';
-                tdCode.textContent = line; // Show original formatting
+                tdCode.textContent = line;
                 tr.appendChild(tdCode);
 
-                // AX Column
-                let tdAx = document.createElement('td');
-                tdAx.textContent = formatHex(regs.ax);
-                if (changedReg === 'ax') tdAx.className = 'highlight';
-                tr.appendChild(tdAx);
+                ['ax', 'bx', 'cx', 'dx'].forEach(reg => {
+                    let td = document.createElement('td');
+                    td.textContent = formatHex(regs[reg]);
+                    if (changedReg === reg) td.className = 'highlight';
+                    tr.appendChild(td);
+                });
 
-                // BX Column
-                let tdBx = document.createElement('td');
-                tdBx.textContent = formatHex(regs.bx);
-                if (changedReg === 'bx') tdBx.className = 'highlight';
-                tr.appendChild(tdBx);
+                // Add empty cells for the dynamic memory columns to keep alignment
+                variables.forEach(v => {
+                    tr.appendChild(document.createElement('td')); // For the 'tag db' column
+                    v.vals.forEach(() => {
+                        tr.appendChild(document.createElement('td')); // For the value columns
+                    });
+                });
 
                 tbody.appendChild(tr);
             });
         }
 
-        // Run the parser whenever the user types
         document.getElementById('asm-code').addEventListener('input', parseAssembly);
-
-        // Run once on load to populate the initial table
         parseAssembly();
     </script>
 </body>
