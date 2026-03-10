@@ -3,58 +3,66 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Assembly Dry Run Setup Generator</title>
+    <title>Pro Assembly Dry Run Sheet</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             margin: 20px;
-            display: flex;
-            gap: 20px;
-            background-color: #f9f9f9;
-        }
-        .editor-pane {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            min-width: 300px;
+            background-color: #f3f2f1;
+            color: #333;
         }
         .toolbar {
-            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            background-color: white;
+            padding: 10px 20px;
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            flex-wrap: wrap;
         }
         button {
-            padding: 10px 15px;
+            padding: 8px 16px;
             background-color: #006699;
             color: white;
             border: none;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 16px;
             font-weight: bold;
         }
-        button:hover {
-            background-color: #004d73;
+        button:hover { background-color: #004d73; }
+        button.danger { background-color: #cc0000; }
+        button.danger:hover { background-color: #990000; }
+        
+        /* Color Picker Styles */
+        .color-picker {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+            border-left: 2px solid #eee;
+            padding-left: 15px;
         }
-        textarea {
-            width: 100%;
-            height: 500px;
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 16px;
-            padding: 10px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            resize: none;
-            white-space: pre;
-            overflow-wrap: normal;
-            overflow-x: auto;
+        .color-swatch {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            cursor: pointer;
+            border: 2px solid transparent;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
         }
-        .grid-pane {
-            flex: 2;
+        .color-swatch.active {
+            border-color: #333;
+            transform: scale(1.1);
+        }
+
+        .grid-container {
             overflow-x: auto;
             background-color: white;
             border: 1px solid #ccc;
-            border-radius: 4px;
-            padding: 10px;
             box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            max-height: 75vh;
+            overflow-y: auto;
         }
         table {
             border-collapse: collapse;
@@ -62,73 +70,72 @@
             font-family: 'Courier New', Courier, monospace;
             font-size: 16px;
         }
+        thead {
+            position: sticky;
+            top: 0;
+            background-color: white;
+            z-index: 10;
+        }
         th, td {
             border: 1px solid #d4d4d4;
-            padding: 8px 12px;
+            padding: 6px 10px;
             text-align: center;
-            min-width: 60px;
-            height: 24px;
+            min-width: 50px;
+            height: 28px;
         }
         th {
-            background-color: #f0f0f0;
-            font-weight: normal;
+            background-color: #eaeaea;
+            font-weight: bold;
             color: #333;
         }
-        td.code-cell {
-            text-align: left;
-            color: #006699; 
-            font-weight: bold;
-            white-space: nowrap;
-            background-color: #fafafa;
-            user-select: none;
+        .sub-header th {
+            background-color: #f5f5f5;
+            font-size: 14px;
+            color: #666;
+            font-weight: normal;
         }
-        /* Excel-like interaction styling */
+        .idx-header th {
+            background-color: #fafafa;
+            font-size: 12px;
+            color: #888;
+        }
         td[contenteditable="true"] {
             outline: none;
             cursor: text;
         }
         td[contenteditable="true"]:focus {
-            outline: 2px solid #217346; /* Excel green outline */
+            outline: 2px solid #217346;
             background-color: #f4fff8;
         }
-        .highlight {
-            background-color: #ffff00 !important;
+        .code-cell {
+            text-align: left;
+            color: #006699; 
+            font-weight: bold;
+            min-width: 200px;
+            background-color: #fbfbfb;
         }
-        .sub-header {
-            background-color: #fafafa;
-            color: #666;
-            font-size: 14px;
-        }
-        .instructions {
-            font-size: 14px;
-            color: #555;
-            margin-bottom: 15px;
+        .spacer-col {
+            min-width: 15px !important;
+            max-width: 15px !important;
+            background-color: #f0f0f0;
+            border-left: 2px solid #bbb;
+            border-right: 2px solid #bbb;
         }
     </style>
 </head>
 <body>
 
-    <div class="editor-pane">
-        <div class="toolbar">
-            <button onclick="generateSetup()">Generate Sheet</button>
-        </div>
-        <textarea id="asm-code" spellcheck="false">
-[org 0x0100]
-
-tag db 00 01, 01 04, 08 00
-
-mov ax, 2
-mov bx, 2
-add ax, bx
-
-mov ax, 0x4c00
-int 0x21</textarea>
+    <div class="toolbar">
+        <button onclick="addRow()">+ Add Row</button>
+        <button onclick="syncRAM()">Sync RAM Layout</button>
+        <button onclick="clearAll()" class="danger">Clear Sheet</button>
+        
+        <div class="color-picker" id="color-picker">
+            <span style="font-size: 14px; font-weight: bold; margin-right: 5px;">Highlighter:</span>
+            </div>
     </div>
 
-    <div class="grid-pane">
-        <div class="instructions">
-            <strong>How to use:</strong> Click any cell to type. <strong>Double-click</strong> a cell to highlight it yellow.
-        </div>
+    <div class="grid-container">
         <table id="output-grid">
             <thead id="grid-head">
                 </thead>
@@ -138,112 +145,225 @@ int 0x21</textarea>
     </div>
 
     <script>
-        function generateSetup() {
-            const code = document.getElementById('asm-code').value;
-            const lines = code.split('\n');
-            const thead = document.getElementById('grid-head');
-            const tbody = document.getElementById('grid-body');
-            
-            thead.innerHTML = '';
-            tbody.innerHTML = '';
+        // --- High visibility palette ---
+        const colors = [
+            '#ffffff', // White (Eraser)
+            '#ffff00', // Yellow
+            '#00ff00', // Lime
+            '#00ffff', // Cyan
+            '#ff99cc', // Pink
+            '#ffcc00', // Orange
+            '#cc99ff', // Purple
+            '#99ccff', // Light Blue
+            '#ff9999', // Salmon
+            '#ccffcc'  // Mint
+        ];
+        let activeColor = '#ffff00';
 
+        // Initialize color picker
+        const picker = document.getElementById('color-picker');
+        colors.forEach((color, index) => {
+            let swatch = document.createElement('div');
+            swatch.className = 'color-swatch' + (color === activeColor ? ' active' : '');
+            swatch.style.backgroundColor = color;
+            if(color === '#ffffff') swatch.style.border = '1px solid #ccc'; // So eraser is visible
+            swatch.onclick = () => {
+                document.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
+                swatch.classList.add('active');
+                activeColor = color;
+            };
+            picker.appendChild(swatch);
+        });
+
+        // --- Save & Load State ---
+        function saveState() {
+            localStorage.setItem('dryRunHead', document.getElementById('grid-head').innerHTML);
+            localStorage.setItem('dryRunBody', document.getElementById('grid-body').innerHTML);
+        }
+
+        function loadState() {
+            const savedHead = localStorage.getItem('dryRunHead');
+            const savedBody = localStorage.getItem('dryRunBody');
+            if (savedHead && savedBody) {
+                document.getElementById('grid-head').innerHTML = savedHead;
+                document.getElementById('grid-body').innerHTML = savedBody;
+            } else {
+                buildBaseHeaders();
+                for(let i=0; i<15; i++) addRow();
+            }
+        }
+
+        function clearAll() {
+            if(confirm("Are you sure you want to wipe the sheet entirely?")) {
+                localStorage.clear();
+                document.getElementById('grid-head').innerHTML = '';
+                document.getElementById('grid-body').innerHTML = '';
+                loadState();
+            }
+        }
+
+        // --- Table Building Logic ---
+        function buildBaseHeaders() {
+            const thead = document.getElementById('grid-head');
+            thead.innerHTML = `
+                <tr>
+                    <th rowspan="3">Code / Instruction</th>
+                    <th rowspan="3">AX</th>
+                    <th rowspan="3">BX</th>
+                    <th rowspan="3">CX</th>
+                    <th rowspan="3">DX</th>
+                </tr>
+                <tr class="sub-header"></tr>
+                <tr class="idx-header"></tr>
+            `;
+        }
+
+        function addRow() {
+            const tbody = document.getElementById('grid-body');
+            const theadRows = document.getElementById('grid-head').querySelectorAll('tr');
+            
+            // Calculate total columns based on the first header row + sub headers
+            let colCount = 1 + 4; // Code + Registers
+            let headerCells = theadRows[1].querySelectorAll('th');
+            colCount += headerCells.length; // Add dynamic memory columns
+
+            let tr = document.createElement('tr');
+            
+            let tdCode = document.createElement('td');
+            tdCode.className = 'code-cell';
+            tdCode.contentEditable = "true";
+            tr.appendChild(tdCode);
+
+            for (let i = 1; i < colCount; i++) {
+                let td = document.createElement('td');
+                td.className = 'hex-cell';
+                td.contentEditable = "true";
+                // If the corresponding column is a spacer, apply the class
+                if(theadRows[1].cells[i - 5] && theadRows[1].cells[i - 5].classList.contains('spacer-col')) {
+                    td.className = 'spacer-col';
+                    td.contentEditable = "false";
+                }
+                tr.appendChild(td);
+            }
+            tbody.appendChild(tr);
+            saveState();
+        }
+
+        // --- Core Feature: Parse Code & Build RAM ---
+        function syncRAM() {
+            const tbody = document.getElementById('grid-body');
+            const thead = document.getElementById('grid-head');
             let variables = [];
 
-            // --- Find variables to build dynamic columns ---
-            lines.forEach(line => {
-                let cleanLine = line.split(';')[0].trim();
-                let varMatch = cleanLine.match(/^([a-zA-Z_]\w*)\s+(d[bwd])\s+(.+)$/i);
-                
+            // 1. Scan code column for arrays
+            Array.from(tbody.rows).forEach(row => {
+                let codeText = row.cells[0].innerText.trim();
+                let varMatch = codeText.match(/^([a-zA-Z_]\w*)\s+(d[bwd])\s+(.+)$/i);
                 if (varMatch) {
                     let name = varMatch[1];
                     let type = varMatch[2].toLowerCase();
-                    let vals = varMatch[3].split(/,\s*|\s{2,}/).map(v => v.trim());
+                    let vals = varMatch[3].split(/,\s*|\s+/).map(v => v.trim()).filter(v => v !== '');
                     variables.push({ name, type, vals });
                 }
             });
 
-            // --- BUILD HEADERS ---
-            let trHead1 = document.createElement('tr');
-            let trHead2 = document.createElement('tr'); 
-            trHead2.className = 'sub-header';
+            // 2. Rebuild headers
+            buildBaseHeaders();
+            let tr1 = thead.rows[0]; // Main Tags
+            let tr2 = thead.rows[1]; // Values
+            let tr3 = thead.rows[2]; // Indices
 
-            // Fixed columns
-            ['Instruction', 'ax', 'bx', 'cx', 'dx'].forEach(text => {
-                let th = document.createElement('th');
-                th.textContent = text;
-                th.rowSpan = 2; 
-                trHead1.appendChild(th);
-            });
+            variables.forEach((v, vIndex) => {
+                // Spacer column between arrays (skip for the first one)
+                if (vIndex > 0) {
+                    tr1.appendChild(createTh('', 3, 'spacer-col'));
+                    tr2.appendChild(createTh('', 1, 'spacer-col'));
+                    tr3.appendChild(createTh('', 1, 'spacer-col'));
+                }
 
-            // Dynamic memory columns
-            variables.forEach(v => {
-                let thVarName = document.createElement('th');
-                thVarName.textContent = `${v.name} ${v.type}`;
-                thVarName.rowSpan = 2;
-                trHead1.appendChild(thVarName);
+                let thTag = document.createElement('th');
+                thTag.textContent = `${v.name} ${v.type}`;
+                thTag.colSpan = v.vals.length;
+                tr1.appendChild(thTag);
 
-                v.vals.forEach((val, index) => {
-                    let thVal = document.createElement('th');
-                    thVal.textContent = val;
-                    trHead1.appendChild(thVal);
-
-                    let thIdx = document.createElement('th');
-                    thIdx.textContent = index; 
-                    trHead2.appendChild(thIdx);
+                v.vals.forEach((val, idx) => {
+                    tr2.appendChild(createTh(val));
+                    tr3.appendChild(createTh(idx));
                 });
             });
 
-            thead.appendChild(trHead1);
-            thead.appendChild(trHead2);
+            // 3. Align existing rows to new column count
+            let expectedCols = 5; // Code + 4 Regs
+            if(variables.length > 0) {
+                // Add spacer counts and value counts
+                expectedCols += (variables.length - 1); 
+                variables.forEach(v => expectedCols += v.vals.length);
+            }
 
-            // Calculate total columns for formatting purposes
-            const totalDynamicCols = variables.reduce((acc, v) => acc + 1 + v.vals.length, 0);
-            
-            // --- BUILD EMPTY ROWS FOR INSTRUCTIONS ---
-            lines.forEach(line => {
-                let cleanLine = line.split(';')[0].trim();
-                let tr = document.createElement('tr');
-                
-                let tdCode = document.createElement('td');
-                tdCode.className = 'code-cell';
-                tdCode.textContent = line;
-                
-                // If it's empty or a directive, just span the whole row
-                if (!cleanLine || cleanLine.startsWith('[') || cleanLine.includes(' db ') || cleanLine.includes(' dw ')) {
-                    if (line.trim() !== '') {
-                        tdCode.colSpan = 5 + totalDynamicCols; 
-                        tr.appendChild(tdCode);
-                        tbody.appendChild(tr);
-                    }
-                    return; 
-                }
-
-                // If it's actual code, create the editable cells
-                tr.appendChild(tdCode);
-
-                // 4 registers + all dynamic columns
-                const emptyCellsNeeded = 4 + totalDynamicCols;
-                for(let i = 0; i < emptyCellsNeeded; i++) {
+            Array.from(tbody.rows).forEach(row => {
+                while(row.cells.length < expectedCols) {
                     let td = document.createElement('td');
-                    td.contentEditable = "true"; // Makes it behave like Excel
-                    tr.appendChild(td);
+                    td.className = 'hex-cell';
+                    td.contentEditable = "true";
+                    row.appendChild(td);
                 }
-
-                tbody.appendChild(tr);
+                while(row.cells.length > expectedCols) {
+                    row.deleteCell(-1);
+                }
+                // Re-apply spacer styling to correct columns
+                for(let i=5; i<expectedCols; i++) {
+                    if(tr2.cells[i-5].classList.contains('spacer-col')) {
+                        row.cells[i].className = 'spacer-col';
+                        row.cells[i].contentEditable = "false";
+                        row.cells[i].innerText = '';
+                    } else {
+                        if(row.cells[i].classList.contains('spacer-col')) {
+                            row.cells[i].className = 'hex-cell';
+                            row.cells[i].contentEditable = "true";
+                        }
+                    }
+                }
             });
+            saveState();
         }
 
-        // Toggle yellow highlight on double click
-        document.getElementById('grid-body').addEventListener('dblclick', function(e) {
-            if(e.target.tagName === 'TD' && e.target.hasAttribute('contenteditable')) {
-                e.target.classList.toggle('highlight');
-                // Clear text selection that happens on double click
-                window.getSelection().removeAllRanges(); 
+        function createTh(text, rowSpan=1, className='') {
+            let th = document.createElement('th');
+            th.textContent = text;
+            if(rowSpan > 1) th.rowSpan = rowSpan;
+            if(className) th.className = className;
+            return th;
+        }
+
+        // --- Event Listeners for Formatting and Coloring ---
+        const gridBody = document.getElementById('grid-body');
+
+        // Apply Color on Double Click
+        gridBody.addEventListener('dblclick', function(e) {
+            if(e.target.tagName === 'TD') {
+                e.target.style.backgroundColor = activeColor;
+                window.getSelection().removeAllRanges(); // Clear text highlight
+                saveState();
             }
         });
 
-        // Generate the initial sheet on load
-        generateSetup();
+        // Auto-Format Hex on Blur (when clicking out of a cell)
+        gridBody.addEventListener('blur', function(e) {
+            if(e.target.classList.contains('hex-cell')) {
+                // Force to Hex format: Strip all non-hex, capitalize, group by 2 with spaces
+                let raw = e.target.innerText.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+                let formatted = raw.match(/.{1,2}/g)?.join(' ') || '';
+                
+                if(e.target.innerText !== formatted) {
+                    e.target.innerText = formatted;
+                }
+            }
+            saveState(); // Save state anytime the user types something
+        }, true); // Capture phase so it triggers reliably on contenteditable
+
+        // Load data on start
+        window.onload = loadState;
+
     </script>
 </body>
 </html>
