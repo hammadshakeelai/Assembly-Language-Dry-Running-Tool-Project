@@ -1,30 +1,104 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Assembly Dry Run Sheet</title>
-    <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Assembly Dry Run Tool — 8086</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="toolbar">
-        <button onclick="app.addRow()">+ Add Row</button>
-        <button onclick="app.insertVariableTemplate()" class="action-btn">+ Add Variable/Array</button>
-        <button onclick="app.syncRAM()">Sync RAM Layout</button>
-        <button onclick="app.clearAll()" class="danger">Clear Sheet</button>
-        
-        <div class="color-picker" id="color-picker">
-            <span style="font-size: 14px; font-weight: bold; margin-right: 5px;">Highlighter:</span>
+
+  <!-- ── Top Toolbar ── -->
+  <header class="toolbar">
+    <div class="brand">🖥 ASM Dry Run <span class="brand-sub">8086</span></div>
+    <div class="ctrl-group">
+      <button id="btn-reset"     class="btn"        title="Reset CPU & memory">⟳ Reset</button>
+      <button id="btn-step-back" class="btn"        title="Undo last step" disabled>◀ Back</button>
+      <button id="btn-step"      class="btn accent" title="Execute next instruction">Step ▶</button>
+      <button id="btn-run"       class="btn green"  title="Run to end / HLT">▶▶ Run All</button>
+      <button id="btn-stop"      class="btn red"    title="Stop auto-step" style="display:none">⏹ Stop</button>
+    </div>
+    <div class="ctrl-group">
+      <label class="toggle-label">
+        <input type="checkbox" id="auto-toggle"> Auto-Step
+      </label>
+      <label class="speed-label">
+        Speed
+        <input type="range" id="speed-slider" min="1" max="9" value="5">
+        <span id="speed-val">500ms</span>
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <button id="btn-example" class="btn small">Load Example</button>
+      <button id="btn-clear"   class="btn small danger">Clear</button>
+    </div>
+    <div class="status-pill" id="status-pill">Ready</div>
+  </header>
+
+  <!-- ── Main Layout ── -->
+  <div class="main-layout">
+
+    <!-- Left: editor -->
+    <div class="editor-panel">
+      <div class="panel-title">
+        <span>Code Editor</span>
+        <span class="hint">; use semicolons for comments</span>
+      </div>
+      <div class="editor-shell">
+        <div class="line-nums" id="line-nums"></div>
+        <div class="editor-body">
+          <textarea id="editor"
+                    spellcheck="false"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    placeholder="; Enter 8086 assembly here&#10;; e.g.  MOV AX, 5"></textarea>
+          <canvas id="line-highlight-canvas" aria-hidden="true"></canvas>
         </div>
+      </div>
+      <!-- inline error list -->
+      <div class="editor-errors" id="editor-errors"></div>
     </div>
 
-    <div class="grid-container">
-        <table id="output-grid">
-            <thead id="grid-head"></thead>
-            <tbody id="grid-body"></tbody>
-        </table>
-    </div>
+    <!-- Right: info panels -->
+    <div class="right-col">
 
-    <script src="app.js"></script>
+      <!-- Registers -->
+      <div class="panel regs-panel">
+        <div class="panel-title">Registers</div>
+        <div class="regs-grid" id="regs-grid"></div>
+        <div class="ip-bar">IP: <span id="ip-val">0000</span>
+          &nbsp;|&nbsp; SP: <span id="sp-val">FFFE</span></div>
+      </div>
+
+      <!-- Flags + Stack (side by side) -->
+      <div class="row-panels">
+        <div class="panel flags-panel">
+          <div class="panel-title">Flags</div>
+          <div class="flags-row" id="flags-row"></div>
+        </div>
+        <div class="panel stack-panel">
+          <div class="panel-title">Stack <span class="hint">(top → bottom)</span></div>
+          <div class="stack-body" id="stack-body"></div>
+        </div>
+      </div>
+
+      <!-- Tabbed bottom panel -->
+      <div class="panel tab-panel">
+        <div class="tabs" id="tabs">
+          <button class="tab active" data-pane="output">Output</button>
+          <button class="tab"        data-pane="memory">Memory</button>
+          <button class="tab"        data-pane="errors">Errors <span class="badge" id="err-badge">0</span></button>
+          <button class="tab"        data-pane="trace">Trace</button>
+        </div>
+        <div class="pane active" id="pane-output"><pre id="out-pre"></pre></div>
+        <div class="pane"        id="pane-memory"><pre id="mem-pre"></pre></div>
+        <div class="pane"        id="pane-errors"><div id="err-list"></div></div>
+        <div class="pane"        id="pane-trace"><div  id="trace-list"></div></div>
+      </div>
+
+    </div><!-- /right-col -->
+  </div><!-- /main-layout -->
+
+  <script src="app.js"></script>
 </body>
 </html>
