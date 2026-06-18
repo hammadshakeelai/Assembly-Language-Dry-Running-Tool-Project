@@ -1,0 +1,9 @@
+{
+  "name": "asm-8086-dry-run-tool",
+  "version": "1.0.0",
+  "description": "8086 assembly dry-run debugger (AFD-Pro style) — headless engine (app.js) + browser UI, with a correctness test suite.",
+  "private": true,
+  "scripts": {
+    "test": "node tests/run.js"
+  }
+}
