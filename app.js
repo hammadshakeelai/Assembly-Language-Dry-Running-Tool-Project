@@ -14,9 +14,11 @@ class CPU {
   constructor() { this.reset(); }
 
   reset() {
-    this.regs  = { AX:0, BX:0, CX:0, DX:0, SI:0, DI:0, SP:0xFFFE, BP:0 };
-    this.flags = { ZF:0, SF:0, CF:0, OF:0, PF:0, DF:0 };
+    this.regs  = { AX:0, BX:0, CX:0, DX:0, SI:0, DI:0, SP:0xFFFE, BP:0, CS:0, DS:0, ES:0, SS:0 };
+    this.flags = { OF:0, DF:0, IF:1, TF:0, SF:0, ZF:0, AF:0, PF:0, CF:0 };
     this.mem   = new Uint8Array(65536);
+    this.ports = new Uint8Array(65536);   // simulated I/O port space (IN/OUT)
+    this.inputBuffer = [];                 // queued keyboard input (char codes)
     this.ip    = 0;
     this.halted = false;
   }
@@ -26,6 +28,8 @@ class CPU {
       regs:   { ...this.regs },
       flags:  { ...this.flags },
       mem:    this.mem.slice(),
+      ports:  this.ports.slice(),
+      inputBuffer: this.inputBuffer.slice(),
       ip:     this.ip,
       halted: this.halted,
     };
@@ -35,6 +39,8 @@ class CPU {
     this.regs   = { ...snap.regs };
     this.flags  = { ...snap.flags };
     this.mem    = snap.mem.slice();
+    if (snap.ports)       this.ports = snap.ports.slice();
+    if (snap.inputBuffer) this.inputBuffer = snap.inputBuffer.slice();
     this.ip     = snap.ip;
     this.halted = snap.halted;
   }
@@ -42,10 +48,11 @@ class CPU {
   // ── Register accessors ──
   static REG8  = ['AL','AH','BL','BH','CL','CH','DL','DH'];
   static REG16 = ['AX','BX','CX','DX','SI','DI','SP','BP'];
+  static SEG   = ['CS','DS','ES','SS'];
 
-  isReg(n)  { n = n.toUpperCase(); return CPU.REG8.includes(n) || CPU.REG16.includes(n); }
+  isReg(n)  { n = n.toUpperCase(); return CPU.REG8.includes(n) || CPU.REG16.includes(n) || CPU.SEG.includes(n); }
   isReg8(n) { return CPU.REG8.includes(n.toUpperCase()); }
-  isReg16(n){ return CPU.REG16.includes(n.toUpperCase()); }
+  isReg16(n){ n = n.toUpperCase(); return CPU.REG16.includes(n) || CPU.SEG.includes(n); }
   regSize(n){ return this.isReg8(n) ? 8 : 16; }
 
   getReg(n) {
@@ -93,15 +100,18 @@ class CPU {
 
     if (kind === 'ADD') {
       this.flags.CF = result > mask ? 1 : 0;
+      this.flags.AF = ((a ^ b ^ result) & 0x10) ? 1 : 0;
       const sa = a & signBit, sb = b & signBit, sr = res & signBit;
       this.flags.OF = (sa === sb && sr !== sa) ? 1 : 0;
     } else if (kind === 'SUB') {
       this.flags.CF = a < b ? 1 : 0;
+      this.flags.AF = ((a ^ b ^ result) & 0x10) ? 1 : 0;
       const sa = a & signBit, sb = b & signBit, sr = res & signBit;
       this.flags.OF = (sa !== sb && sr !== sa) ? 1 : 0;
     } else {
       this.flags.CF = 0;
       this.flags.OF = 0;
+      this.flags.AF = 0;
     }
   }
 
@@ -152,11 +162,11 @@ class Parser {
 
       if (this._isSegDir(stripped, 'DATA'))  { inData = true;  continue; }
       if (this._isSegDir(stripped, 'CODE'))  { inData = false; continue; }
-      if (this._skipLine(stripped))          { continue; }
 
       let rest = stripped;
 
-      // Label
+      // Label — peel BEFORE skip-line check so labels named like directives
+      // (end:, proc:, code:) are still registered, not swallowed.
       const lm = rest.match(/^(\w+):\s*(.*)/);
       if (lm) {
         const lname = lm[1].toUpperCase();
@@ -164,6 +174,8 @@ class Parser {
         rest = lm[2].trim();
         if (!rest) continue;
       }
+
+      if (this._skipLine(rest)) continue;
 
       if (inData) {
         this._parseVar(rest, i + 1);
@@ -181,12 +193,13 @@ class Parser {
 
       if (this._isSegDir(stripped, 'DATA'))  { inData = true;  continue; }
       if (this._isSegDir(stripped, 'CODE'))  { inData = false; continue; }
-      if (this._skipLine(stripped))          { continue; }
 
       let rest = stripped;
 
       const lm = rest.match(/^(\w+):\s*(.*)/);
       if (lm) { rest = lm[2].trim(); if (!rest) continue; }
+
+      if (this._skipLine(rest)) continue;
 
       if (inData) continue;
 
@@ -349,12 +362,10 @@ class Executor {
       return { value: this.cpu.memRead(addr, size), size, isMem: true, addr };
     }
 
-    // Variable name (bare)
+    // Bare data symbol → its OFFSET (NASM semantics; use [sym] for contents).
     const vn = arg.toUpperCase();
     if (this.vars[vn]) {
-      const v = this.vars[vn];
-      const size = ptrSize ?? (v.size === 1 ? 8 : 16);
-      return { value: this.cpu.memRead(v.addr, size), size, isMem: true, addr: v.addr, varName: vn };
+      return { value: this.vars[vn].addr, size: 16, isImm: true, varName: vn };
     }
 
     // Immediate
@@ -400,17 +411,21 @@ class Executor {
   }
 
   _evalAddr(expr) {
-    // Replace register/variable names with numeric values
-    const replaced = expr.replace(/\b([A-Za-z]{2,3})\b/g, (_, r) => {
-      const rv = this.cpu.getReg(r);
-      if (rv !== null) return rv;
+    let s = expr;
+    // Numeric literals → decimal, BEFORE identifier substitution.
+    s = s.replace(/\b([0-9][0-9A-Fa-f]*)[hH]\b/g, (_, n) => parseInt(n, 16).toString(10)); // 1234h / 0FFh
+    s = s.replace(/\b0[xX]([0-9A-Fa-f]+)\b/g,     (_, n) => parseInt(n, 16).toString(10)); // 0x1234
+    s = s.replace(/\b([01]+)[bB]\b/g,             (_, n) => parseInt(n, 2).toString(10));  // 1010b
+    // Registers & data symbols → their numeric value / offset.
+    s = s.replace(/\b([A-Za-z_]\w*)\b/g, (_, r) => {
+      if (this.cpu.isReg(r)) return this.cpu.getReg(r);
       const vv = this.vars[r.toUpperCase()];
       if (vv) return vv.addr;
       return _;
     });
-    if (!/^[\d\s\+\-\*\/\(\)]+$/.test(replaced)) throw new Error(`Bad address: ${expr}`);
+    if (!/^[\d\s\+\-\*\/\(\)]+$/.test(s)) throw new Error(`Bad address: ${expr}`);
     // eslint-disable-next-line no-new-func
-    return (Function('"use strict";return(' + replaced + ')'))() & 0xFFFF;
+    return (Function('"use strict";return(' + s + ')'))() & 0xFFFF;
   }
 
   _parseImm(s) {
@@ -473,7 +488,7 @@ class Executor {
         }
 
         case 'LEA': {
-          const addr = this._resolveAddr(args[1]);
+          const addr = this._addrOf(args[1]);
           this.set(args[0], addr);
           note = `→ ${this._fmtOp(args[0])} = ${hex(addr)}`;
           break;
@@ -572,10 +587,16 @@ class Executor {
           if (src.size === 8) {
             const r = this._sign(this.cpu.getReg('AL'), 8) * this._sign(src.value, 8);
             this.cpu.setReg('AX', r & 0xFFFF);
+            const al = r & 0xFF, ah = (r >> 8) & 0xFF, ext = (al & 0x80) ? 0xFF : 0x00;
+            this.cpu.flags.CF = this.cpu.flags.OF = (ah === ext) ? 0 : 1; // set iff result ≠ sign-extension of low half
+            note = `AX = ${hex(r & 0xFFFF)}`;
           } else {
             const r = this._sign(this.cpu.getReg('AX'), 16) * this._sign(src.value, 16);
-            this.cpu.setReg('AX', r & 0xFFFF);
-            this.cpu.setReg('DX', (r >> 16) & 0xFFFF);
+            const ax = r & 0xFFFF, dx = (r >> 16) & 0xFFFF, ext = (ax & 0x8000) ? 0xFFFF : 0x0000;
+            this.cpu.setReg('AX', ax);
+            this.cpu.setReg('DX', dx);
+            this.cpu.flags.CF = this.cpu.flags.OF = (dx === ext) ? 0 : 1;
+            note = `DX:AX = ${hex(dx)}:${hex(ax)}`;
           }
           break;
         }
@@ -647,51 +668,109 @@ class Executor {
         case 'SHL': case 'SAL': {
           const a = this.resolve(args[0]);
           const cnt = this._shiftCount(args[1]);
+          if (cnt === 0) break;                       // count 0 leaves flags & value unchanged
           const mask = a.size === 8 ? 0xFF : 0xFFFF;
-          if (cnt > 0) this.cpu.flags.CF = (a.value >> (a.size - cnt)) & 1;
           const result = (a.value << cnt) & mask;
-          this.cpu.updateFlags(result, a.size, 'LOG', result, result);
+          this.cpu.updateFlags(result, a.size, 'LOG', result, result); // ZF/SF/PF only
+          this.cpu.flags.CF = cnt <= a.size ? (a.value >> (a.size - cnt)) & 1 : 0;
+          if (cnt === 1) this.cpu.flags.OF = (((result >> (a.size - 1)) & 1) ^ this.cpu.flags.CF) ? 1 : 0;
           this.set(args[0], result);
+          note = `${this._fmtOp(args[0])} = ${hex(result)}`;
           break;
         }
 
         case 'SHR': {
           const a = this.resolve(args[0]);
           const cnt = this._shiftCount(args[1]);
-          if (cnt > 0) this.cpu.flags.CF = (a.value >> (cnt - 1)) & 1;
+          if (cnt === 0) break;
           const result = a.value >>> cnt;
-          this.cpu.updateFlags(result, a.size, 'LOG', result, result);
+          this.cpu.updateFlags(result, a.size, 'LOG', result, result); // ZF/SF/PF only
+          this.cpu.flags.CF = (a.value >> (cnt - 1)) & 1;
+          if (cnt === 1) this.cpu.flags.OF = ((a.value >> (a.size - 1)) & 1) ? 1 : 0;
           this.set(args[0], result);
+          note = `${this._fmtOp(args[0])} = ${hex(result)}`;
           break;
         }
 
         case 'SAR': {
           const a = this.resolve(args[0]);
           const cnt = this._shiftCount(args[1]);
+          if (cnt === 0) break;
           const signed = this._sign(a.value, a.size);
           const result = (signed >> cnt) & (a.size === 8 ? 0xFF : 0xFFFF);
-          this.cpu.updateFlags(result, a.size, 'LOG', result, result);
+          this.cpu.updateFlags(result, a.size, 'LOG', result, result); // ZF/SF/PF only
+          this.cpu.flags.CF = (a.value >> (cnt - 1)) & 1;
+          if (cnt === 1) this.cpu.flags.OF = 0;
           this.set(args[0], result);
+          note = `${this._fmtOp(args[0])} = ${hex(result)}`;
           break;
         }
 
         case 'ROL': {
           const a = this.resolve(args[0]);
-          const cnt = this._shiftCount(args[1]) % a.size;
+          const raw = this._shiftCount(args[1]);
+          if (raw === 0) break;
           const mask = a.size === 8 ? 0xFF : 0xFFFF;
-          const result = ((a.value << cnt) | (a.value >>> (a.size - cnt))) & mask;
+          const cnt = raw % a.size;
+          const result = cnt === 0 ? (a.value & mask)
+                       : ((a.value << cnt) | (a.value >>> (a.size - cnt))) & mask;
           this.cpu.flags.CF = result & 1;
+          if (raw === 1) this.cpu.flags.OF = (((result >> (a.size - 1)) & 1) ^ (result & 1)) ? 1 : 0;
           this.set(args[0], result);
+          note = `${this._fmtOp(args[0])} = ${hex(result)}`;
           break;
         }
 
         case 'ROR': {
           const a = this.resolve(args[0]);
-          const cnt = this._shiftCount(args[1]) % a.size;
+          const raw = this._shiftCount(args[1]);
+          if (raw === 0) break;
           const mask = a.size === 8 ? 0xFF : 0xFFFF;
-          const result = ((a.value >>> cnt) | (a.value << (a.size - cnt))) & mask;
+          const cnt = raw % a.size;
+          const result = cnt === 0 ? (a.value & mask)
+                       : ((a.value >>> cnt) | (a.value << (a.size - cnt))) & mask;
           this.cpu.flags.CF = (result >> (a.size - 1)) & 1;
+          if (raw === 1) this.cpu.flags.OF = (((result >> (a.size - 1)) & 1) ^ ((result >> (a.size - 2)) & 1)) ? 1 : 0;
           this.set(args[0], result);
+          note = `${this._fmtOp(args[0])} = ${hex(result)}`;
+          break;
+        }
+
+        case 'RCL': {
+          const a = this.resolve(args[0]);
+          const raw = this._shiftCount(args[1]);
+          if (raw === 0) break;
+          const mask = a.size === 8 ? 0xFF : 0xFFFF;
+          const cnt = raw % (a.size + 1);          // rotate through carry: 9-bit / 17-bit
+          let cf = this.cpu.flags.CF, val = a.value & mask;
+          for (let i = 0; i < cnt; i++) {
+            const newCf = (val >> (a.size - 1)) & 1;
+            val = ((val << 1) | cf) & mask;
+            cf = newCf;
+          }
+          this.cpu.flags.CF = cf;
+          if (raw === 1) this.cpu.flags.OF = (((val >> (a.size - 1)) & 1) ^ cf) ? 1 : 0;
+          this.set(args[0], val);
+          note = `${this._fmtOp(args[0])} = ${hex(val)}`;
+          break;
+        }
+
+        case 'RCR': {
+          const a = this.resolve(args[0]);
+          const raw = this._shiftCount(args[1]);
+          if (raw === 0) break;
+          const mask = a.size === 8 ? 0xFF : 0xFFFF;
+          const cnt = raw % (a.size + 1);
+          let cf = this.cpu.flags.CF, val = a.value & mask;
+          if (raw === 1) this.cpu.flags.OF = (((val >> (a.size - 1)) & 1) ^ cf) ? 1 : 0; // before rotate
+          for (let i = 0; i < cnt; i++) {
+            const newCf = val & 1;
+            val = ((val >>> 1) | (cf << (a.size - 1))) & mask;
+            cf = newCf;
+          }
+          this.cpu.flags.CF = cf;
+          this.set(args[0], val);
+          note = `${this._fmtOp(args[0])} = ${hex(val)}`;
           break;
         }
 
@@ -786,38 +865,246 @@ class Executor {
         // ── INT ──
         case 'INT': {
           const num = this._parseImm(args[0]);
-          if (num === 0x21) {
+          if (num === 0x20) {                       // terminate program
+            this.cpu.halted = true; note = 'EXIT (INT 20h)';
+          } else if (num === 0x21) {
             const ah = this.cpu.getReg('AH');
-            if (ah === 0x01) {
-              this.cpu.setReg('AL', 32); // simulate space input
-            } else if (ah === 0x02) {
-              const ch = String.fromCharCode(this.cpu.getReg('DL') & 0x7F);
-              this.output.push(ch);
-              note = `output: '${ch}'`;
-            } else if (ah === 0x09) {
-              let addr = this.cpu.getReg('DX');
-              let str = '';
-              for (let i = 0; i < 512; i++) {
-                const b = this.cpu.mem[(addr + i) & 0xFFFF];
-                if (b === 0x24) break;
-                str += String.fromCharCode(b);
+            switch (ah) {
+              case 0x01: {                          // read char, with echo
+                const c = this._readChar(); this.cpu.setReg('AL', c & 0xFF);
+                if (c) this.output.push(String.fromCharCode(c));
+                note = `input '${c ? String.fromCharCode(c) : ''}'`; break;
               }
-              this.output.push(str);
-              note = `output: "${str.replace(/\r\n|\n/g,'↵')}"`;
-            } else if (ah === 0x4C) {
-              this.cpu.halted = true;
-              note = `EXIT code=${hex(this.cpu.getReg('AL'))}`;
+              case 0x06: {                          // direct console I/O
+                const dl = this.cpu.getReg('DL');
+                if (dl === 0xFF) { const c = this._readChar(); this.cpu.setReg('AL', c & 0xFF); this.cpu.flags.ZF = c ? 0 : 1; }
+                else this.output.push(String.fromCharCode(dl & 0xFF));
+                break;
+              }
+              case 0x07: case 0x08: {               // read char, no echo
+                const c = this._readChar(); this.cpu.setReg('AL', c & 0xFF);
+                note = 'input (no echo)'; break;
+              }
+              case 0x02: {                          // print char in DL
+                const ch = String.fromCharCode(this.cpu.getReg('DL') & 0xFF);
+                this.output.push(ch); note = `output '${ch}'`; break;
+              }
+              case 0x09: {                          // print '$'-terminated string at DS:DX
+                const addr = this.cpu.getReg('DX'); let str = '';
+                for (let i = 0; i < 1024; i++) { const b = this.cpu.mem[(addr + i) & 0xFFFF]; if (b === 0x24) break; str += String.fromCharCode(b); }
+                this.output.push(str); note = `output "${str.replace(/\r\n|\n/g,'↵')}"`; break;
+              }
+              case 0x0A: {                          // buffered keyboard input → DS:DX
+                const addr = this.cpu.getReg('DX'), max = this.cpu.mem[addr & 0xFFFF];
+                let n = 0, str = '';
+                while (n < max - 1) {
+                  const c = this._readChar();
+                  if (!c || c === 13) break;
+                  this.cpu.mem[(addr + 2 + n) & 0xFFFF] = c; n++; str += String.fromCharCode(c);
+                }
+                this.cpu.mem[(addr + 2 + n) & 0xFFFF] = 13;   // CR terminator
+                this.cpu.mem[(addr + 1) & 0xFFFF] = n;        // char count
+                this.output.push(str); note = `buffered input "${str}" (${n})`; break;
+              }
+              case 0x2A: {                          // get system date
+                const d = new Date();
+                this.cpu.setReg('CX', d.getFullYear()); this.cpu.setReg('DH', d.getMonth() + 1);
+                this.cpu.setReg('DL', d.getDate());   this.cpu.setReg('AL', d.getDay()); break;
+              }
+              case 0x2C: {                          // get system time
+                const d = new Date();
+                this.cpu.setReg('CH', d.getHours());  this.cpu.setReg('CL', d.getMinutes());
+                this.cpu.setReg('DH', d.getSeconds()); this.cpu.setReg('DL', Math.floor(d.getMilliseconds() / 10)); break;
+              }
+              case 0x30: {                          // get DOS version (report 6.22)
+                this.cpu.setReg('AL', 6); this.cpu.setReg('AH', 22);
+                this.cpu.setReg('BX', 0); this.cpu.setReg('CX', 0); break;
+              }
+              case 0x4C: {                          // terminate with return code
+                this.cpu.halted = true; note = `EXIT code=${hex(this.cpu.getReg('AL'))}`; break;
+              }
+              default: note = `INT 21h AH=${hex(ah, 2)} (unhandled)`;
             }
-          } else if (num === 0x10) {
-            // Basic video: AH=0Eh write TTY
+          } else if (num === 0x10) {                // BIOS video
             const ah = this.cpu.getReg('AH');
-            if (ah === 0x0E) {
-              const ch = String.fromCharCode(this.cpu.getReg('AL') & 0x7F);
-              this.output.push(ch);
-            }
+            if (ah === 0x0E || ah === 0x09 || ah === 0x0A)
+              this.output.push(String.fromCharCode(this.cpu.getReg('AL') & 0xFF));
+          } else if (num === 0x16) {                // BIOS keyboard
+            const ah = this.cpu.getReg('AH');
+            if (ah === 0x00 || ah === 0x10) { const c = this._readChar(); this.cpu.setReg('AL', c & 0xFF); this.cpu.setReg('AH', 0); }
+            else if (ah === 0x01 || ah === 0x11) { const has = this.cpu.inputBuffer.length > 0; this.cpu.flags.ZF = has ? 0 : 1; if (has) this.cpu.setReg('AL', this.cpu.inputBuffer[0] & 0xFF); }
+          } else {
+            note = `INT ${hex(num, 2)}h (no-op)`;
           }
           break;
         }
+
+        // ── String instructions ──
+        case 'MOVSB': case 'MOVSW': case 'STOSB': case 'STOSW':
+        case 'LODSB': case 'LODSW': case 'SCASB': case 'SCASW':
+        case 'CMPSB': case 'CMPSW':
+          this._strOp(op);
+          note = op;
+          break;
+
+        case 'REP': case 'REPE': case 'REPZ': case 'REPNE': case 'REPNZ': {
+          const sop = (args[0] || '').toUpperCase();
+          const checkZF = op !== 'REP';
+          const wantZF  = (op === 'REPE' || op === 'REPZ') ? 1 : 0;
+          let cx = this.cpu.getReg('CX'), guard = 0;
+          while (cx !== 0) {
+            this._strOp(sop);
+            cx = (cx - 1) & 0xFFFF;
+            this.cpu.setReg('CX', cx);
+            if (checkZF && (sop.startsWith('SCAS') || sop.startsWith('CMPS')) && this.cpu.flags.ZF !== wantZF) break;
+            if (guard++ > 300000) throw new Error('REP exceeded step limit');
+          }
+          note = `${op} ${sop} → CX=${hex(cx)}`;
+          break;
+        }
+
+        // ── BCD adjust ──
+        case 'DAA': {
+          const al = this.cpu.getReg('AL'), oldCF = this.cpu.flags.CF;
+          let AL = al, CF = 0;
+          if ((AL & 0x0F) > 9 || this.cpu.flags.AF) { const s = AL + 6; CF = oldCF | (s > 0xFF ? 1 : 0); AL = s & 0xFF; this.cpu.flags.AF = 1; }
+          else this.cpu.flags.AF = 0;
+          if (al > 0x99 || oldCF) { AL = (AL + 0x60) & 0xFF; CF = 1; }
+          this.cpu.flags.CF = CF; this.cpu.setReg('AL', AL); this._setSZP(AL);
+          break;
+        }
+        case 'DAS': {
+          const al = this.cpu.getReg('AL'), oldCF = this.cpu.flags.CF;
+          let AL = al, CF = 0;
+          if ((AL & 0x0F) > 9 || this.cpu.flags.AF) { const borrow = AL < 6 ? 1 : 0; AL = (AL - 6) & 0xFF; CF = oldCF | borrow; this.cpu.flags.AF = 1; }
+          else this.cpu.flags.AF = 0;
+          if (al > 0x99 || oldCF) { AL = (AL - 0x60) & 0xFF; CF = 1; }
+          this.cpu.flags.CF = CF; this.cpu.setReg('AL', AL); this._setSZP(AL);
+          break;
+        }
+        case 'AAA': {
+          if ((this.cpu.getReg('AL') & 0x0F) > 9 || this.cpu.flags.AF) {
+            this.cpu.setReg('AX', (this.cpu.getReg('AX') + 0x106) & 0xFFFF);
+            this.cpu.flags.AF = 1; this.cpu.flags.CF = 1;
+          } else { this.cpu.flags.AF = 0; this.cpu.flags.CF = 0; }
+          this.cpu.setReg('AL', this.cpu.getReg('AL') & 0x0F);
+          break;
+        }
+        case 'AAS': {
+          if ((this.cpu.getReg('AL') & 0x0F) > 9 || this.cpu.flags.AF) {
+            this.cpu.setReg('AX', (this.cpu.getReg('AX') - 6) & 0xFFFF);
+            this.cpu.setReg('AH', (this.cpu.getReg('AH') - 1) & 0xFF);
+            this.cpu.flags.AF = 1; this.cpu.flags.CF = 1;
+          } else { this.cpu.flags.AF = 0; this.cpu.flags.CF = 0; }
+          this.cpu.setReg('AL', this.cpu.getReg('AL') & 0x0F);
+          break;
+        }
+        case 'AAM': {
+          const base = args[0] ? (this._parseImm(args[0]) ?? 10) : 10;
+          const al = this.cpu.getReg('AL');
+          this.cpu.setReg('AH', Math.floor(al / base) & 0xFF);
+          this.cpu.setReg('AL', (al % base) & 0xFF);
+          this._setSZP(this.cpu.getReg('AL'));
+          break;
+        }
+        case 'AAD': {
+          const base = args[0] ? (this._parseImm(args[0]) ?? 10) : 10;
+          const al = this.cpu.getReg('AL'), ah = this.cpu.getReg('AH');
+          this.cpu.setReg('AL', (al + ah * base) & 0xFF);
+          this.cpu.setReg('AH', 0);
+          this._setSZP(this.cpu.getReg('AL'));
+          break;
+        }
+
+        // ── Stack push/pop all (186) ──
+        case 'PUSHA': case 'PUSHAW': {
+          const sp = this.cpu.getReg('SP');
+          this.cpu.push(this.cpu.getReg('AX')); this.cpu.push(this.cpu.getReg('CX'));
+          this.cpu.push(this.cpu.getReg('DX')); this.cpu.push(this.cpu.getReg('BX'));
+          this.cpu.push(sp);
+          this.cpu.push(this.cpu.getReg('BP')); this.cpu.push(this.cpu.getReg('SI'));
+          this.cpu.push(this.cpu.getReg('DI'));
+          break;
+        }
+        case 'POPA': case 'POPAW': {
+          this.cpu.setReg('DI', this.cpu.pop()); this.cpu.setReg('SI', this.cpu.pop());
+          this.cpu.setReg('BP', this.cpu.pop()); this.cpu.pop(); // discard saved SP
+          this.cpu.setReg('BX', this.cpu.pop()); this.cpu.setReg('DX', this.cpu.pop());
+          this.cpu.setReg('CX', this.cpu.pop()); this.cpu.setReg('AX', this.cpu.pop());
+          break;
+        }
+
+        // ── Flag <-> AH transfer ──
+        case 'LAHF': {
+          const f = this.cpu.flags;
+          this.cpu.setReg('AH', (f.CF | (1 << 1) | (f.PF << 2) | (f.AF << 4) | (f.ZF << 6) | (f.SF << 7)) & 0xFF);
+          break;
+        }
+        case 'SAHF': {
+          const ah = this.cpu.getReg('AH');
+          this.cpu.flags.CF = ah & 1; this.cpu.flags.PF = (ah >> 2) & 1;
+          this.cpu.flags.AF = (ah >> 4) & 1; this.cpu.flags.ZF = (ah >> 6) & 1;
+          this.cpu.flags.SF = (ah >> 7) & 1;
+          break;
+        }
+
+        // ── Load far pointer: reg ← [m], DS/ES ← [m+2] ──
+        case 'LDS': case 'LES': {
+          const addr = this._addrOf(args[1]);
+          this.set(args[0], this.cpu.memRead(addr, 16));
+          this.cpu.setReg(op === 'LDS' ? 'DS' : 'ES', this.cpu.memRead((addr + 2) & 0xFFFF, 16));
+          note = `${this._fmtOp(args[0])} ${op === 'LDS' ? 'DS' : 'ES'} loaded`;
+          break;
+        }
+
+        // ── Stack frame (186) ──
+        case 'ENTER': {
+          const size = this._parseImm(args[0]) ?? 0;  // nesting level ignored (level 0)
+          this.cpu.push(this.cpu.getReg('BP'));
+          this.cpu.setReg('BP', this.cpu.getReg('SP'));
+          this.cpu.setReg('SP', (this.cpu.getReg('SP') - size) & 0xFFFF);
+          break;
+        }
+        case 'LEAVE': {
+          this.cpu.setReg('SP', this.cpu.getReg('BP'));
+          this.cpu.setReg('BP', this.cpu.pop());
+          break;
+        }
+
+        // ── Port I/O (simulated port space) ──
+        case 'IN': {
+          const port = this.cpu.isReg(args[1]) ? this.cpu.getReg(args[1]) : (this._parseImm(args[1]) ?? 0);
+          if (args[0].toUpperCase() === 'AL') this.cpu.setReg('AL', this.cpu.ports[port & 0xFFFF]);
+          else this.cpu.setReg('AX', this.cpu.ports[port & 0xFFFF] | (this.cpu.ports[(port + 1) & 0xFFFF] << 8));
+          note = `IN ${this._fmtOp(args[0])} ← port ${hex(port)}`;
+          break;
+        }
+        case 'OUT': {
+          const port = this.cpu.isReg(args[0]) ? this.cpu.getReg(args[0]) : (this._parseImm(args[0]) ?? 0);
+          if (args[1].toUpperCase() === 'AL') this.cpu.ports[port & 0xFFFF] = this.cpu.getReg('AL');
+          else { const v = this.cpu.getReg('AX'); this.cpu.ports[port & 0xFFFF] = v & 0xFF; this.cpu.ports[(port + 1) & 0xFFFF] = (v >> 8) & 0xFF; }
+          note = `OUT port ${hex(port)} ← ${this._fmtOp(args[1])}`;
+          break;
+        }
+
+        // ── Interrupt return / overflow trap ──
+        case 'IRET': case 'IRETW': {
+          if (this.cpu.regs.SP >= 0xFFFE) { this.cpu.halted = true; note = 'HALTED (no IRET frame)'; break; }
+          this.cpu.ip = this.cpu.pop();
+          this.cpu.setReg('CS', this.cpu.pop());
+          this._setFlagsWord(this.cpu.pop());
+          jumped = true;
+          note = `→ IP=${hex(this.cpu.ip)}`;
+          break;
+        }
+        case 'INTO': {
+          note = this.cpu.flags.OF ? 'INTO (OF set)' : 'INTO (no trap)';
+          break;
+        }
+
+        // ── Accepted no-ops ──
+        case 'WAIT': case 'FWAIT': case 'LOCK': case 'ESC': case 'HNT':
+          break;
 
         default:
           throw new Error(`Unsupported instruction: ${op}`);
@@ -848,19 +1135,67 @@ class Executor {
     return (this._parseImm(arg) ?? 1) & 0x1F;
   }
 
+  // Effective address from either `[expr]` or a bare data symbol.
+  _addrOf(arg) {
+    const { arg: a } = this._stripPtr(arg);
+    if (a.startsWith('[')) return this._resolveAddr(a);
+    const v = this.vars[a.toUpperCase()];
+    if (v) return v.addr;
+    return this._evalAddr(a);
+  }
+
+  // Consume one queued input char code (0 if none queued).
+  _readChar() {
+    return this.cpu.inputBuffer.length ? this.cpu.inputBuffer.shift() : 0;
+  }
+
+  // Set SF/ZF/PF from an 8-bit result (used by BCD adjust ops).
+  _setSZP(v) {
+    const r = v & 0xFF;
+    this.cpu.flags.ZF = r === 0 ? 1 : 0;
+    this.cpu.flags.SF = (r & 0x80) ? 1 : 0;
+    let p = r; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1;
+    this.cpu.flags.PF = (~p) & 1;
+  }
+
+  // One iteration of a string instruction (flat segments). DF picks direction.
+  _strOp(op) {
+    const d  = this.cpu.flags.DF ? -1 : 1;
+    const si = this.cpu.getReg('SI'), di = this.cpu.getReg('DI');
+    const adv = (reg, n) => this.cpu.setReg(reg, (this.cpu.getReg(reg) + n) & 0xFFFF);
+    switch (op) {
+      case 'MOVSB': this.cpu.memWrite(di, this.cpu.memRead(si, 8), 8);  adv('SI', d);   adv('DI', d);   break;
+      case 'MOVSW': this.cpu.memWrite(di, this.cpu.memRead(si, 16), 16); adv('SI', 2*d); adv('DI', 2*d); break;
+      case 'STOSB': this.cpu.memWrite(di, this.cpu.getReg('AL'), 8);  adv('DI', d);   break;
+      case 'STOSW': this.cpu.memWrite(di, this.cpu.getReg('AX'), 16); adv('DI', 2*d); break;
+      case 'LODSB': this.cpu.setReg('AL', this.cpu.memRead(si, 8));  adv('SI', d);   break;
+      case 'LODSW': this.cpu.setReg('AX', this.cpu.memRead(si, 16)); adv('SI', 2*d); break;
+      case 'SCASB': { const a = this.cpu.getReg('AL'), b = this.cpu.memRead(di, 8);  this.cpu.updateFlags(a - b, 8, 'SUB', a, b);  adv('DI', d);   break; }
+      case 'SCASW': { const a = this.cpu.getReg('AX'), b = this.cpu.memRead(di, 16); this.cpu.updateFlags(a - b, 16, 'SUB', a, b); adv('DI', 2*d); break; }
+      case 'CMPSB': { const a = this.cpu.memRead(si, 8),  b = this.cpu.memRead(di, 8);  this.cpu.updateFlags(a - b, 8, 'SUB', a, b);  adv('SI', d);   adv('DI', d);   break; }
+      case 'CMPSW': { const a = this.cpu.memRead(si, 16), b = this.cpu.memRead(di, 16); this.cpu.updateFlags(a - b, 16, 'SUB', a, b); adv('SI', 2*d); adv('DI', 2*d); break; }
+      default: throw new Error(`Unknown string op: ${op}`);
+    }
+  }
+
   _fmtOp(s) {
     return s.toUpperCase().replace(/\s+/g, '');
   }
 
   _flagsWord() {
     const f = this.cpu.flags;
-    return f.CF | (f.PF << 2) | (f.ZF << 6) | (f.SF << 7) | (f.OF << 11);
+    return f.CF | (f.PF << 2) | (f.AF << 4) | (f.ZF << 6) | (f.SF << 7)
+         | (f.TF << 8) | (f.IF << 9) | (f.DF << 10) | (f.OF << 11);
   }
   _setFlagsWord(w) {
     this.cpu.flags.CF = w & 1;
     this.cpu.flags.PF = (w >> 2) & 1;
+    this.cpu.flags.AF = (w >> 4) & 1;
     this.cpu.flags.ZF = (w >> 6) & 1;
     this.cpu.flags.SF = (w >> 7) & 1;
+    this.cpu.flags.TF = (w >> 8) & 1;
+    this.cpu.flags.IF = (w >> 9) & 1;
+    this.cpu.flags.DF = (w >> 10) & 1;
     this.cpu.flags.OF = (w >> 11) & 1;
   }
 }
@@ -1558,4 +1893,11 @@ function escHtml(s) {
 }
 
 // ── Boot ──
-document.addEventListener('DOMContentLoaded', () => { window._app = new App(); });
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => { window._app = new App(); });
+}
+
+// ── Node export (headless engine for tests) ──
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { CPU, Parser, Executor, EXAMPLES, hex, hex2, dec };
+}
