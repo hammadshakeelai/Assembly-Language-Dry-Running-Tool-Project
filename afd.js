@@ -17,6 +17,16 @@
                '#555555','#5555FF','#55FF55','#55FFFF','#FF5555','#FF55FF','#FFFF55','#FFFFFF'];
   const BG = 1, GRAY = 7, WHITE = 15, RED = 12, GREEN = 10, YEL = 14, CYAN = 11, DGRAY = 8;
 
+  // IBM CP437 → Unicode (all 256 code points) so memory dumps show authentic glyphs.
+  const CP437 =
+    ' ☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼' +
+    ' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNO' +
+    'PQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~⌂' +
+    'ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»' +
+    '░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀' +
+    'αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ';
+  const cp = b => CP437[b & 0xFF] || ' ';
+
   const hx = (v, w = 4) => ((v < 0 ? v >>> 0 : v) & (w === 2 ? 0xFF : w === 5 ? 0xFFFFF : 0xFFFF))
                             .toString(16).toUpperCase().padStart(w, '0');
   const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -484,7 +494,7 @@
       const cpu = this.cpu;
       S.clear(GREEN, 0);
       S.fill(0, 0, 80, 1, ' ', WHITE, DGRAY);
-      S.text(1, 0, 'DOSBox 0.74, Cpu speed:   4000 cycles, Frameskip  0, Program:     AFD', WHITE, DGRAY);
+      S.text(1, 0, 'DOSBox 0.74, Cpu speed:   3000 cycles, Frameskip  0, Program:     AFD', WHITE, DGRAY);
       const R = n => hx(cpu.getReg(n));
       const reg = (x, y, lbl, val) => { S.text(x, y, lbl, GREEN); S.text(x + 3, y, val, WHITE); };
       reg(1, 1, 'AX', R('AX')); reg(1, 2, 'BX', R('BX')); reg(1, 3, 'CX', R('CX')); reg(1, 4, 'DX', R('DX'));
@@ -493,34 +503,35 @@
       reg(31, 1, 'IP', R('IP')); reg(31, 3, 'HS', R('CS')); reg(31, 4, 'FS', R('SS'));
       S.text(40, 1, 'Stack', GREEN);
       for (let i = 0; i < 4; i++) { const off = (cpu.getReg('SP') + i * 2) & 0xFFFF; const v = cpu.memRead(cpu.linear('SS', off), 16); S.text(47, 1 + i, '+' + (i * 2) + ' ' + hx(v), i === 0 ? WHITE : GREEN); }
-      S.text(60, 1, 'Flags ' + hx(this._flagsWord() | 0x7002), WHITE);   // 8086 reserved bits 1,12-14 = 1
+      S.text(60, 1, 'Flags ', GREEN); S.text(66, 1, hx(this._flagsWord() | 0x7002), YEL);  // 8086 reserved bits 1,12-14 = 1
       S.text(57, 3, 'OF DF IF SF ZF AF PF CF', GREEN);
       let vx = 58; for (const fn of ['OF', 'DF', 'IF', 'SF', 'ZF', 'AF', 'PF', 'CF']) { S.text(vx, 4, String(cpu.flags[fn]), cpu.flags[fn] ? YEL : DGRAY); vx += 3; }
       // CMD line
       S.text(1, 5, 'CMD >' + this.cmd, GREEN); S.put(6 + this.cmd.length, 5, '█', WHITE);
-      // Region contents
-      this._drawAuthCode(S, 7, 1, 38);
-      this._drawAuthM1(S, 7, 41, this.m1, 8);
+      // Region contents: m1 header sits on the separator row; code below the message line
+      this._drawAuthM1(S, 6, 41, this.m1, 9);
+      this._drawAuthCode(S, 8, 1, 38);
       this._drawAuthM2(S, 17, this.m2);
-      // Window boundaries — single-line grey rules between every box, like the real AFD
-      const LN = DGRAY;                                               // grey
+      // Error / message line at the TOP of the code window (red on error), like real AFD
+      const last = this.log[this.log.length - 1];
+      if (last) { const red = last.c === RED; S.text(1, 7, (red ? last.t.replace(/^!\s*/, '') : last.t).slice(0, 37), red ? RED : CYAN, 0); }
+      // Window boundaries — single-line grey rules between every box
+      const LN = DGRAY;
       for (let y = 1; y <= 4; y++) S.put(38, y, '│', LN, 0);          // registers │ stack+flags
-      S.text(0, 6, '─'.repeat(80), LN); S.put(38, 6, '┴', LN); S.put(39, 6, '┬', LN);
+      S.text(0, 6, '─'.repeat(39), LN); S.put(38, 6, '┴', LN); S.put(39, 6, '┐', LN);
       for (let y = 7; y <= 15; y++) S.put(39, y, '│', LN, 0);         // code │ m1
       S.text(0, 16, '─'.repeat(80), LN); S.put(39, 16, '┴', LN); S.put(58, 16, '┬', LN);
       for (let y = 17; y <= 22; y++) S.put(58, y, '│', LN, 0);        // m2 │ ascii
-      // Reserved error / message line — red bar on error, cyan for status
-      const last = this.log[this.log.length - 1];
-      if (last && last.c === RED) { S.fill(0, 23, 80, 1, ' ', WHITE, RED); S.text(1, 23, ('ERROR: ' + last.t.replace(/^!\s*/, '')).slice(0, 78), WHITE, RED); }
-      else if (last) S.text(1, 23, last.t.slice(0, 78), CYAN, 0);
       // Status bar (real AFD F-key labels)
       S.fill(0, 24, 80, 1, ' ', 0, GREEN);
       S.text(1, 24, ' 1 Step  2 ProcStep  3 Retrieve  4 Help  5 BRK  6 Screen  9 Run  Esc Exit ', 0, GREEN);
     }
     _drawAuthCode(S, top, x, w) {
-      const ins = this.ex.instrs, ip = this.cpu.ip, H = 9;
+      const ins = this.ex.instrs, ip = this.cpu.ip, H = 8;
       if (!ins.length) { S.text(x + 1, top + 1, '(no code — Esc to edit)', DGRAY); return; }
-      let start = Math.max(0, Math.min(ip - 3, ins.length - H));
+      // Real-AFD scroll: short programs show from the top; longer ones keep the
+      // current instruction pinned one line from the top and scroll under it.
+      const start = ins.length <= H ? 0 : Math.max(0, ip - 1);
       for (let r = 0; r < H; r++) {
         const i = start + r, y = top + r; if (i >= ins.length) break;
         const o = ins[i], cur = i === ip, bp = this.bp.has(i);
@@ -549,7 +560,7 @@
         const base = (sp.off + r * 16) & 0xFFFF, lin = this.cpu.linear(sp.seg, base), y = top + 1 + r;
         S.text(1, y, sp.seg + ':' + hx(base), GREEN);
         let h = '', asc = '';
-        for (let j = 0; j < 16; j++) { const b = this.cpu.mem[(lin + j) & 0xFFFFF]; h += hx(b, 2) + ' '; asc += (b >= 32 && b < 127) ? String.fromCharCode(b) : '.'; }
+        for (let j = 0; j < 16; j++) { const b = this.cpu.mem[(lin + j) & 0xFFFFF]; h += hx(b, 2) + ' '; asc += cp(b); }
         S.text(10, y, h, WHITE);
         S.text(59, y, asc, GREEN);
       }
@@ -614,7 +625,7 @@
     _drawCode(S) {
       const ins = this.ex.instrs, ip = this.cpu.ip, H = 8;
       if (!ins.length) { S.text(34, 5, '(no code — type a program, Esc to edit)', DGRAY); return; }
-      let start = Math.max(0, Math.min(ip - 2, ins.length - H));
+      const start = ins.length <= H ? 0 : Math.max(0, ip - 1);   // real-AFD scroll: current pinned near top
       for (let r = 0; r < H; r++) {
         const i = start + r, y = 2 + r;
         if (i >= ins.length) break;
@@ -639,7 +650,7 @@
         for (let j = 0; j < 16; j++) {
           const b = this.cpu.mem[(lin + j) & 0xFFFFF];
           hexs += hx(b, 2) + ' ';
-          asc += (b >= 32 && b < 127) ? String.fromCharCode(b) : '.';
+          asc += cp(b);
         }
         S.text(8, y, hexs, WHITE);
         S.text(8 + 48 + 1, y, asc, col);
