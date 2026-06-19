@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Assembly Dry Run Tool — 8086</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="afd.css">
 </head>
 <body>
 
@@ -29,6 +30,7 @@
       </label>
     </div>
     <div class="ctrl-group">
+      <button id="btn-afd"     class="btn afd-launch" title="Lock code into CS:0100 and open the AFD debugger screen">🐞 AFD Debug (F1)</button>
       <button id="btn-example" class="btn small">Load Example</button>
       <button id="btn-clear"   class="btn small danger">Clear</button>
     </div>
@@ -99,6 +101,12 @@
     </div><!-- /right-col -->
   </div><!-- /main-layout -->
 
+  <!-- ── AFD full-screen debugger (80x25 DOS text, scaled to fit) ── -->
+  <div id="afd-root" hidden>
+    <div id="afd-screen"></div>
+  </div>
+
   <script src="app.js"></script>
+  <script src="afd.js"></script>
 </body>
 </html>

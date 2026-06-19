@@ -1,0 +1,44 @@
+/* ================================================================
+   AFD full-screen debugger — DOS 80x25 text-mode look.
+   Rendered as a real VGA text matrix (afd.js) and scaled to fit
+   any viewport, so it looks like the genuine AFD screen on any
+   device with zero configuration.
+   ================================================================ */
+
+#afd-root {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: #0000AA;            /* DOS blue */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+#afd-root[hidden] { display: none; }
+
+#afd-screen {
+  font-family: 'Consolas', 'Lucida Console', 'Courier New', monospace;
+  font-size: 16px;               /* overridden by JS fit() */
+  line-height: 1.18;
+  letter-spacing: 0;
+  white-space: pre;
+  user-select: none;
+  font-variant-ligatures: none;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: none;
+  background: #0000AA;
+  cursor: default;
+}
+#afd-screen span { white-space: pre; }
+
+/* Blinking command cursor */
+@keyframes afd-blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+
+/* Little launcher pill on the editor screen */
+.btn.afd-launch {
+  border-color: #f5c842;
+  color: #f5c842;
+  font-weight: 700;
+}
+.btn.afd-launch:hover { background: #f5c842; color: #000; }

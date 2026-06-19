@@ -14,13 +14,20 @@ class CPU {
   constructor() { this.reset(); }
 
   reset() {
-    this.regs  = { AX:0, BX:0, CX:0, DX:0, SI:0, DI:0, SP:0xFFFE, BP:0, CS:0, DS:0, ES:0, SS:0 };
+    this.regs  = { AX:0, BX:0, CX:0, DX:0, SI:0, DI:0, SP:0xFFFE, BP:0, CS:0, DS:0, ES:0, SS:0, IP:0x100 };
     this.flags = { OF:0, DF:0, IF:1, TF:0, SF:0, ZF:0, AF:0, PF:0, CF:0 };
-    this.mem   = new Uint8Array(65536);
+    this.mem   = new Uint8Array(0x100000); // real 1 MB segmented address space (20-bit)
     this.ports = new Uint8Array(65536);   // simulated I/O port space (IN/OUT)
     this.inputBuffer = [];                 // queued keyboard input (char codes)
     this.ip    = 0;
     this.halted = false;
+  }
+
+  // Real-mode address translation: physical = (segment << 4) + offset, wrapped to 20 bits.
+  // `seg` may be a register name ('DS','SS',…) or a numeric selector value.
+  linear(seg, off) {
+    const s = (typeof seg === 'string') ? (this.regs[seg.toUpperCase()] ?? 0) : seg;
+    return (((s & 0xFFFF) << 4) + (off & 0xFFFF)) & 0xFFFFF;
   }
 
   snapshot() {
@@ -115,28 +122,28 @@ class CPU {
     }
   }
 
-  // ── Memory ──
+  // ── Memory ──  (addresses here are LINEAR/physical 20-bit; callers segment first)
   memRead(addr, size = 16) {
-    addr &= 0xFFFF;
-    return size === 8 ? this.mem[addr] : (this.mem[addr] | (this.mem[(addr + 1) & 0xFFFF] << 8));
+    addr &= 0xFFFFF;
+    return size === 8 ? this.mem[addr] : (this.mem[addr] | (this.mem[(addr + 1) & 0xFFFFF] << 8));
   }
   memWrite(addr, val, size = 16) {
-    addr &= 0xFFFF;
+    addr &= 0xFFFFF;
     if (size === 8) {
       this.mem[addr] = val & 0xFF;
     } else {
-      this.mem[addr]              = val & 0xFF;
-      this.mem[(addr + 1) & 0xFFFF] = (val >> 8) & 0xFF;
+      this.mem[addr]                = val & 0xFF;
+      this.mem[(addr + 1) & 0xFFFFF] = (val >> 8) & 0xFF;
     }
   }
 
-  // ── Stack ──
+  // ── Stack ──  (always SS:SP)
   push(val) {
     this.regs.SP = (this.regs.SP - 2) & 0xFFFF;
-    this.memWrite(this.regs.SP, val, 16);
+    this.memWrite(this.linear('SS', this.regs.SP), val, 16);
   }
   pop() {
-    const val = this.memRead(this.regs.SP, 16);
+    const val = this.memRead(this.linear('SS', this.regs.SP), 16);
     this.regs.SP = (this.regs.SP + 2) & 0xFFFF;
     return val;
   }
@@ -316,6 +323,46 @@ class Executor {
     this.output = [];
     this.trace  = [];
     this._initMemory();
+    this._assignAddresses();
+  }
+
+  // Give every instruction a real byte address (COM-style base CS:0100), build
+  // an address→index map, and prime the IP register. Lets the debugger show an
+  // authentic CS:IP and resolve breakpoints / "go" targets by address.
+  _assignAddresses() {
+    let off = 0x100;
+    this.addrToIdx = {};
+    this.codeBase  = 0x100;
+    for (let i = 0; i < this.instrs.length; i++) {
+      const ins = this.instrs[i];
+      ins.addr = off;
+      this.addrToIdx[off] = i;
+      off = (off + this._estLen(ins)) & 0xFFFF;
+    }
+    this.codeEnd = off;
+    this.cpu.regs.IP = this.instrs.length ? this.instrs[0].addr : 0x100;
+  }
+
+  // Estimated encoded length (bytes) — plausible, monotonic addresses for the
+  // disassembly window. (The engine executes mnemonics, not encoded bytes.)
+  _estLen(ins) {
+    const op = ins.op, a = ins.args || [];
+    const ONE = new Set(['NOP','HLT','RET','RETN','RETF','IRET','IRETW','CBW','CWD','PUSHF','POPF',
+      'PUSHA','PUSHAW','POPA','POPAW','LAHF','SAHF','CLC','STC','CMC','CLD','STD','CLI','STI',
+      'XLAT','XLATB','DAA','DAS','AAA','AAS','MOVSB','MOVSW','STOSB','STOSW','LODSB','LODSW',
+      'SCASB','SCASW','CMPSB','CMPSW','LEAVE','WAIT','FWAIT','LOCK','INTO','INT3',
+      'REP','REPE','REPZ','REPNE','REPNZ']);
+    if (ONE.has(op)) return 1;
+    if (op === 'INT' || op === 'AAM' || op === 'AAD') return 2;
+    if (op[0] === 'J' || op.startsWith('LOOP')) return 2;            // short jumps / loops
+    if (op === 'CALL' || op === 'JMP') return /\bFAR\b/i.test(a[0] || '') ? 5 : 3;
+    if (op === 'PUSH' || op === 'POP') return this.cpu.isReg(a[0] || '') ? 1 : ((a[0] || '').includes('[') ? 2 : 3);
+    let len = 2;
+    const mem = a.some(x => x && x.includes('['));
+    const imm = a.some(x => x && /^[-0-9]/.test(x.trim()) && !x.includes('['));
+    if (mem) len += 2;
+    if (imm) len += a.some(x => x && this.cpu.isReg16(x)) ? 2 : 1;
+    return Math.min(len, 6);
   }
 
   _initMemory() {
@@ -355,11 +402,12 @@ class Executor {
       return { value: this.cpu.getReg(arg), size, isReg: true, name: arg.toUpperCase() };
     }
 
-    // Memory [...]
-    if (arg.startsWith('[')) {
-      const addr = this._resolveAddr(arg);
+    // Memory [...]  (segment chosen by override prefix, BP→SS, else DS)
+    if (this._isMemArg(arg)) {
+      const mi   = this._memInfo(arg);
       const size = ptrSize ?? 16;
-      return { value: this.cpu.memRead(addr, size), size, isMem: true, addr };
+      return { value: this.cpu.memRead(mi.linear, size), size, isMem: true,
+               addr: mi.off, seg: mi.seg, linear: mi.linear };
     }
 
     // Bare data symbol → its OFFSET (NASM semantics; use [sym] for contents).
@@ -382,24 +430,51 @@ class Executor {
     throw new Error(`Unknown operand: ${raw}`);
   }
 
-  set(raw, value) {
-    const { arg } = this._stripPtr(raw);
+  set(raw, value, size) {
+    const { arg, size: ptrSize } = this._stripPtr(raw);
     if (this.cpu.isReg(arg)) {
       const mask = this.cpu.regSize(arg) === 8 ? 0xFF : 0xFFFF;
       this.cpu.setReg(arg, value & mask);
       return;
     }
-    if (arg.startsWith('[')) {
-      this.cpu.memWrite(this._resolveAddr(arg), value);
+    if (this._isMemArg(arg)) {
+      const mi = this._memInfo(arg);
+      this.cpu.memWrite(mi.linear, value, ptrSize ?? size ?? 16);
       return;
     }
     const vn = arg.toUpperCase();
     if (this.vars[vn]) {
       const v = this.vars[vn];
-      this.cpu.memWrite(v.addr, value, v.size * 8);
+      this.cpu.memWrite(this.cpu.linear('DS', v.addr), value, v.size * 8);
       return;
     }
     throw new Error(`Cannot write to: ${raw}`);
+  }
+
+  // Is this operand a memory reference?  Accepts `[...]` and an optional
+  // segment-override prefix in either MASM (`ES:[BX]`) or NASM (`[ES:BX]`) form.
+  _isMemArg(arg) {
+    return arg.startsWith('[') || /^(CS|DS|ES|SS)\s*:\s*\[/i.test(arg);
+  }
+
+  // Resolve a memory operand to { seg, off, linear }, honouring:
+  //  • explicit segment override (CS/DS/ES/SS),
+  //  • the 8086 rule that any BP-based address defaults to the stack segment,
+  //  • otherwise the data segment.
+  _memInfo(arg) {
+    let seg = null;
+    let m = arg.match(/^(CS|DS|ES|SS)\s*:\s*(\[.*\])$/i);   // MASM:  ES:[BX]
+    if (m) { seg = m[1].toUpperCase(); arg = m[2]; }
+    if (!arg.startsWith('[') || !arg.endsWith(']')) throw new Error(`Bad memory operand: ${arg}`);
+
+    let inner = arg.slice(1, -1).trim();
+    const im = inner.match(/^(CS|DS|ES|SS)\s*:\s*(.*)$/i);  // NASM:  [ES:BX]
+    if (im) { seg = im[1].toUpperCase(); inner = im[2].trim(); }
+
+    const vn  = inner.toUpperCase();
+    const off = (this.vars[vn] ? this.vars[vn].addr : this._evalAddr(inner)) & 0xFFFF;
+    if (!seg) seg = /\bBP\b/i.test(inner) ? 'SS' : 'DS';
+    return { seg, off, linear: this.cpu.linear(seg, off) };
   }
 
   _resolveAddr(expr) {
@@ -472,8 +547,20 @@ class Executor {
         // ── Data transfer ──
         case 'MOV': {
           if (!args[0] || !args[1]) throw new Error('MOV needs 2 operands');
+          const d = this._stripPtr(args[0]).arg.toUpperCase();
+          const s = this._stripPtr(args[1]).arg.toUpperCase();
+          // 8086 rules for segment registers and operand sizes
+          if (d === 'CS') throw new Error('Illegal: CS cannot be a MOV destination');
+          if (CPU.SEG.includes(d)) {
+            if (this._parseImm(args[1]) !== null) throw new Error(`Illegal: MOV ${d}, immediate — load a segment through a register`);
+            if (CPU.SEG.includes(s))              throw new Error(`Illegal: MOV ${d}, ${s} — segment-to-segment not allowed`);
+            if (this.cpu.isReg(s) && this.cpu.regSize(s) !== 16) throw new Error(`Operand size mismatch: MOV ${d}, ${s}`);
+          } else if (this.cpu.isReg(d) && this.cpu.isReg(s) && !CPU.SEG.includes(s) &&
+                     this.cpu.regSize(d) !== this.cpu.regSize(s)) {
+            throw new Error(`Operand size mismatch: MOV ${d}, ${s}`);
+          }
           const src = this.resolve(args[1]);
-          this.set(args[0], src.value);
+          this.set(args[0], src.value, src.isReg ? src.size : undefined);
           note = `→ ${this._fmtOp(args[0])} = ${hex(src.value)}`;
           break;
         }
@@ -506,8 +593,8 @@ class Executor {
         }
 
         case 'XLAT': case 'XLATB': {
-          const addr = (this.cpu.getReg('BX') + this.cpu.getReg('AL')) & 0xFFFF;
-          this.cpu.setReg('AL', this.cpu.mem[addr]);
+          const off = (this.cpu.getReg('BX') + this.cpu.getReg('AL')) & 0xFFFF;
+          this.cpu.setReg('AL', this.cpu.memRead(this.cpu.linear('DS', off), 8));
           break;
         }
 
@@ -606,14 +693,18 @@ class Executor {
           if (src.value === 0) throw new Error('Division by zero');
           if (src.size === 8) {
             const ax = this.cpu.getReg('AX');
-            this.cpu.setReg('AL', Math.floor(ax / src.value) & 0xFF);
+            const q = Math.floor(ax / src.value);
+            if (q > 0xFF) throw new Error('Divide overflow — quotient too large for AL');
+            this.cpu.setReg('AL', q & 0xFF);
             this.cpu.setReg('AH', (ax % src.value) & 0xFF);
-            note = `AL=${hex(Math.floor(ax/src.value)&0xFF)} AH=${hex(ax%src.value&0xFF)}`;
+            note = `AL=${hex(q & 0xFF)} AH=${hex(ax % src.value & 0xFF)}`;
           } else {
             const dxax = (this.cpu.getReg('DX') * 0x10000 + this.cpu.getReg('AX'));
-            this.cpu.setReg('AX', Math.floor(dxax / src.value) & 0xFFFF);
+            const q = Math.floor(dxax / src.value);
+            if (q > 0xFFFF) throw new Error('Divide overflow — quotient too large for AX');
+            this.cpu.setReg('AX', q & 0xFFFF);
             this.cpu.setReg('DX', (dxax % src.value) & 0xFFFF);
-            note = `AX=${hex(Math.floor(dxax/src.value)&0xFFFF)} DX=${hex(dxax%src.value&0xFFFF)}`;
+            note = `AX=${hex(q & 0xFFFF)} DX=${hex(dxax % src.value & 0xFFFF)}`;
           }
           break;
         }
@@ -624,12 +715,16 @@ class Executor {
           if (src.size === 8) {
             const ax = this._sign(this.cpu.getReg('AX'), 16);
             const sv = this._sign(src.value, 8);
-            this.cpu.setReg('AL', Math.trunc(ax / sv) & 0xFF);
+            const q  = Math.trunc(ax / sv);
+            if (q < -128 || q > 127) throw new Error('Divide overflow — signed quotient out of range');
+            this.cpu.setReg('AL', q & 0xFF);
             this.cpu.setReg('AH', ((ax % sv) + 0x100) & 0xFF);
           } else {
             const dxax = this._sign(this.cpu.getReg('DX'), 16) * 0x10000 + this.cpu.getReg('AX');
             const sv   = this._sign(src.value, 16);
-            this.cpu.setReg('AX', Math.trunc(dxax / sv) & 0xFFFF);
+            const q    = Math.trunc(dxax / sv);
+            if (q < -32768 || q > 32767) throw new Error('Divide overflow — signed quotient out of range');
+            this.cpu.setReg('AX', q & 0xFFFF);
             this.cpu.setReg('DX', ((dxax % sv) + 0x10000) & 0xFFFF);
           }
           break;
@@ -791,11 +886,13 @@ class Executor {
         case 'POPF':  this._setFlagsWord(this.cpu.pop()); break;
 
         // ── Control flow ──
-        case 'JMP':
-          this.cpu.ip = this._jumpTarget(args[0]);
+        case 'JMP': {
+          const tgt = args[0].replace(/\bFAR\b/i, '').replace(/\bPTR\b/i, '').trim();
+          this.cpu.ip = this._jumpTarget(tgt);
           jumped = true;
-          note = `→ ${args[0]}`;
+          note = `→ ${tgt}`;
           break;
+        }
 
         case 'JE':  case 'JZ':   jumped = this._condJump(args[0], this.cpu.flags.ZF===1); break;
         case 'JNE': case 'JNZ':  jumped = this._condJump(args[0], this.cpu.flags.ZF===0); break;
@@ -838,16 +935,22 @@ class Executor {
         }
 
         case 'CALL': {
+          const far = /\bFAR\b/i.test(args[0]);
+          const tgt = args[0].replace(/\bFAR\b/i, '').replace(/\bPTR\b/i, '').trim();
+          if (far) this.cpu.push(this.cpu.getReg('CS'));   // far call saves CS:IP
           this.cpu.push(this.cpu.ip + 1);
-          this.cpu.ip = this._jumpTarget(args[0]);
+          this.cpu.ip = this._jumpTarget(tgt);
           jumped = true;
-          note = `ret→${this.cpu.ip-1}`;
+          note = far ? 'far call' : `ret→${this.cpu.ip - 1}`;
           break;
         }
 
-        case 'RET': {
+        case 'RET': case 'RETN': case 'RETF': {
           if (this.cpu.regs.SP >= 0xFFFE) { this.cpu.halted = true; note='HALTED (no ret addr)'; break; }
           this.cpu.ip = this.cpu.pop();
+          if (op === 'RETF') this.cpu.setReg('CS', this.cpu.pop());   // far return restores CS
+          const extra = args[0] ? (this._parseImm(args[0]) ?? 0) : 0; // RET n : caller-cleanup
+          if (extra) this.cpu.setReg('SP', (this.cpu.getReg('SP') + extra) & 0xFFFF);
           jumped = true;
           note = `→ IP=${hex(this.cpu.ip)}`;
           break;
@@ -890,20 +993,20 @@ class Executor {
                 this.output.push(ch); note = `output '${ch}'`; break;
               }
               case 0x09: {                          // print '$'-terminated string at DS:DX
-                const addr = this.cpu.getReg('DX'); let str = '';
-                for (let i = 0; i < 1024; i++) { const b = this.cpu.mem[(addr + i) & 0xFFFF]; if (b === 0x24) break; str += String.fromCharCode(b); }
+                const off = this.cpu.getReg('DX'); let str = '';
+                for (let i = 0; i < 1024; i++) { const b = this.cpu.memRead(this.cpu.linear('DS', (off + i) & 0xFFFF), 8); if (b === 0x24) break; str += String.fromCharCode(b); }
                 this.output.push(str); note = `output "${str.replace(/\r\n|\n/g,'↵')}"`; break;
               }
               case 0x0A: {                          // buffered keyboard input → DS:DX
-                const addr = this.cpu.getReg('DX'), max = this.cpu.mem[addr & 0xFFFF];
+                const off = this.cpu.getReg('DX'), max = this.cpu.memRead(this.cpu.linear('DS', off & 0xFFFF), 8);
                 let n = 0, str = '';
                 while (n < max - 1) {
                   const c = this._readChar();
                   if (!c || c === 13) break;
-                  this.cpu.mem[(addr + 2 + n) & 0xFFFF] = c; n++; str += String.fromCharCode(c);
+                  this.cpu.memWrite(this.cpu.linear('DS', (off + 2 + n) & 0xFFFF), c, 8); n++; str += String.fromCharCode(c);
                 }
-                this.cpu.mem[(addr + 2 + n) & 0xFFFF] = 13;   // CR terminator
-                this.cpu.mem[(addr + 1) & 0xFFFF] = n;        // char count
+                this.cpu.memWrite(this.cpu.linear('DS', (off + 2 + n) & 0xFFFF), 13, 8);   // CR terminator
+                this.cpu.memWrite(this.cpu.linear('DS', (off + 1) & 0xFFFF), n, 8);        // char count
                 this.output.push(str); note = `buffered input "${str}" (${n})`; break;
               }
               case 0x2A: {                          // get system date
@@ -1050,9 +1153,9 @@ class Executor {
 
         // ── Load far pointer: reg ← [m], DS/ES ← [m+2] ──
         case 'LDS': case 'LES': {
-          const addr = this._addrOf(args[1]);
-          this.set(args[0], this.cpu.memRead(addr, 16));
-          this.cpu.setReg(op === 'LDS' ? 'DS' : 'ES', this.cpu.memRead((addr + 2) & 0xFFFF, 16));
+          const off = this._addrOf(args[1]);
+          this.set(args[0], this.cpu.memRead(this.cpu.linear('DS', off), 16));
+          this.cpu.setReg(op === 'LDS' ? 'DS' : 'ES', this.cpu.memRead(this.cpu.linear('DS', (off + 2) & 0xFFFF), 16));
           note = `${this._fmtOp(args[0])} ${op === 'LDS' ? 'DS' : 'ES'} loaded`;
           break;
         }
@@ -1102,6 +1205,9 @@ class Executor {
           break;
         }
 
+        case 'INT3':  note = 'INT3 (breakpoint trap)'; break;
+        case 'BOUND': note = 'BOUND (array range check)'; break;
+
         // ── Accepted no-ops ──
         case 'WAIT': case 'FWAIT': case 'LOCK': case 'ESC': case 'HNT':
           break;
@@ -1126,6 +1232,8 @@ class Executor {
     this.trace.push(entry);
 
     if (!jumped) this.cpu.ip++;
+    // Keep the architectural IP register in sync with the next CS:IP.
+    this.cpu.regs.IP = (this.cpu.ip < this.instrs.length) ? this.instrs[this.cpu.ip].addr : this.codeEnd;
     return entry;
   }
 
@@ -1161,19 +1269,22 @@ class Executor {
   // One iteration of a string instruction (flat segments). DF picks direction.
   _strOp(op) {
     const d  = this.cpu.flags.DF ? -1 : 1;
-    const si = this.cpu.getReg('SI'), di = this.cpu.getReg('DI');
-    const adv = (reg, n) => this.cpu.setReg(reg, (this.cpu.getReg(reg) + n) & 0xFFFF);
+    const cpu = this.cpu;
+    const src = (sz) => cpu.memRead(cpu.linear('DS', cpu.getReg('SI')), sz);  // DS:SI
+    const dst = (sz) => cpu.memRead(cpu.linear('ES', cpu.getReg('DI')), sz);  // ES:DI
+    const wr  = (sz, v) => cpu.memWrite(cpu.linear('ES', cpu.getReg('DI')), v, sz);
+    const adv = (reg, n) => cpu.setReg(reg, (cpu.getReg(reg) + n) & 0xFFFF);
     switch (op) {
-      case 'MOVSB': this.cpu.memWrite(di, this.cpu.memRead(si, 8), 8);  adv('SI', d);   adv('DI', d);   break;
-      case 'MOVSW': this.cpu.memWrite(di, this.cpu.memRead(si, 16), 16); adv('SI', 2*d); adv('DI', 2*d); break;
-      case 'STOSB': this.cpu.memWrite(di, this.cpu.getReg('AL'), 8);  adv('DI', d);   break;
-      case 'STOSW': this.cpu.memWrite(di, this.cpu.getReg('AX'), 16); adv('DI', 2*d); break;
-      case 'LODSB': this.cpu.setReg('AL', this.cpu.memRead(si, 8));  adv('SI', d);   break;
-      case 'LODSW': this.cpu.setReg('AX', this.cpu.memRead(si, 16)); adv('SI', 2*d); break;
-      case 'SCASB': { const a = this.cpu.getReg('AL'), b = this.cpu.memRead(di, 8);  this.cpu.updateFlags(a - b, 8, 'SUB', a, b);  adv('DI', d);   break; }
-      case 'SCASW': { const a = this.cpu.getReg('AX'), b = this.cpu.memRead(di, 16); this.cpu.updateFlags(a - b, 16, 'SUB', a, b); adv('DI', 2*d); break; }
-      case 'CMPSB': { const a = this.cpu.memRead(si, 8),  b = this.cpu.memRead(di, 8);  this.cpu.updateFlags(a - b, 8, 'SUB', a, b);  adv('SI', d);   adv('DI', d);   break; }
-      case 'CMPSW': { const a = this.cpu.memRead(si, 16), b = this.cpu.memRead(di, 16); this.cpu.updateFlags(a - b, 16, 'SUB', a, b); adv('SI', 2*d); adv('DI', 2*d); break; }
+      case 'MOVSB': wr(8,  src(8));  adv('SI', d);   adv('DI', d);   break;
+      case 'MOVSW': wr(16, src(16)); adv('SI', 2*d); adv('DI', 2*d); break;
+      case 'STOSB': wr(8,  cpu.getReg('AL')); adv('DI', d);   break;
+      case 'STOSW': wr(16, cpu.getReg('AX')); adv('DI', 2*d); break;
+      case 'LODSB': cpu.setReg('AL', src(8));  adv('SI', d);   break;
+      case 'LODSW': cpu.setReg('AX', src(16)); adv('SI', 2*d); break;
+      case 'SCASB': { const a = cpu.getReg('AL'), b = dst(8);  cpu.updateFlags(a - b, 8, 'SUB', a, b);  adv('DI', d);   break; }
+      case 'SCASW': { const a = cpu.getReg('AX'), b = dst(16); cpu.updateFlags(a - b, 16, 'SUB', a, b); adv('DI', 2*d); break; }
+      case 'CMPSB': { const a = src(8),  b = dst(8);  cpu.updateFlags(a - b, 8, 'SUB', a, b);  adv('SI', d);   adv('DI', d);   break; }
+      case 'CMPSW': { const a = src(16), b = dst(16); cpu.updateFlags(a - b, 16, 'SUB', a, b); adv('SI', 2*d); adv('DI', 2*d); break; }
       default: throw new Error(`Unknown string op: ${op}`);
     }
   }
@@ -1467,8 +1578,9 @@ class App {
     if (this.cpu.ip >= this.executor.instrs.length) return this._setStatus('End of program', 'done');
     if (this.parsed.errors.length > 0)     return this._setStatus('Fix errors first', 'error');
 
-    // Save snapshot before step
+    // Save snapshot before step (cap depth — each snapshot copies 1 MB of RAM)
     this.history.push(this.cpu.snapshot());
+    if (this.history.length > 1024) this.history.shift();
 
     const prevRegs = { ...this.cpu.regs };
 
@@ -1516,6 +1628,9 @@ class App {
 
     const MAX = 100000;
     let steps = 0;
+    // Step-back history isn't kept across a full run (1 MB snapshots × 100k
+    // steps is infeasible); single-stepping still records history.
+    this.history = [];
     this.$btnRun.style.display  = 'none';
     this.$btnStop.style.display = '';
 
@@ -1535,11 +1650,9 @@ class App {
           this._updateUI();
           return;
         }
-        this.history.push(this.cpu.snapshot());
         try {
           this.executor.step();
         } catch (e) {
-          this.history.pop();
           this._showRuntimeError(e);
           this.$btnRun.style.display  = '';
           this.$btnStop.style.display = 'none';
