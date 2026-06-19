@@ -322,9 +322,14 @@ class Executor {
     this.errors = [...parsed.errors];
     this.output = [];
     this.trace  = [];
+    this.video  = [];   // DOS-screen events (cursor moves / clears) keyed to output position
     this._initMemory();
     this._assignAddresses();
   }
+
+  // Record a video event (cursor position / clear) anchored to the current
+  // length of the output stream, so a console can be replayed faithfully.
+  _vid(type, data) { this.video.push(Object.assign({ at: this.output.length, type }, data)); }
 
   // Give every instruction a real byte address (COM-style base CS:0100), build
   // an address→index map, and prime the IP register. Lets the debugger show an
@@ -1031,7 +1036,11 @@ class Executor {
           } else if (num === 0x10) {                // BIOS video
             const ah = this.cpu.getReg('AH');
             if (ah === 0x0E || ah === 0x09 || ah === 0x0A)
-              this.output.push(String.fromCharCode(this.cpu.getReg('AL') & 0xFF));
+              this.output.push(String.fromCharCode(this.cpu.getReg('AL') & 0xFF));        // teletype / write char
+            else if (ah === 0x02) this._vid('pos', { r: this.cpu.getReg('DH'), c: this.cpu.getReg('DL') }); // set cursor
+            else if (ah === 0x00) this._vid('cls', {});                                   // set mode → clear
+            else if ((ah === 0x06 || ah === 0x07) && this.cpu.getReg('AL') === 0) this._vid('cls', {}); // scroll/clear window
+            note = `INT 10h AH=${hex(ah, 2)}`;
           } else if (num === 0x16) {                // BIOS keyboard
             const ah = this.cpu.getReg('AH');
             if (ah === 0x00 || ah === 0x10) { const c = this._readChar(); this.cpu.setReg('AL', c & 0xFF); this.cpu.setReg('AH', 0); }

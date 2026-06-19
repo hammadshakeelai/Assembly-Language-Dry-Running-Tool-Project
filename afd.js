@@ -81,6 +81,12 @@
       this.help   = false;
       this.progName = 'PROG.COM';
       this.prevRegs = {};
+      this.userScreen = false;   // showing the full DOS program screen?
+      this.waitingInput = false; // program is blocked reading the keyboard
+      this.inputLine = '';       // line being typed into the running program
+      this._timer = null;        // interactive run loop
+      this.skin = 'modern';      // 'modern' panels | 'authentic' green AFD-Pro look
+      this.splash = false;       // AdTec boot logo showing?
       this._build();
     }
 
@@ -90,7 +96,9 @@
       window.addEventListener('keydown', e => this._onKey(e), true);
       window.addEventListener('resize', () => { if (this.opened) this._fit(); });
       const btn = document.getElementById('btn-afd');
-      if (btn) btn.addEventListener('click', () => this.open());
+      if (btn) btn.addEventListener('click', () => this.open('modern'));
+      const btn2 = document.getElementById('btn-afd2');
+      if (btn2) btn2.addEventListener('click', () => this.open('authentic'));
     }
 
     editor() { return document.getElementById('editor'); }
@@ -111,7 +119,11 @@
       }
     }
 
-    open() {
+    open(skin) {
+      this.skin = skin || 'modern';
+      this.splash = (this.skin === 'authentic');
+      this.userScreen = false; this.waitingInput = false; this.inputLine = '';
+      this._stopRun();
       this.assemble();
       this.opened = true;
       this.$root.hidden = false;
@@ -119,7 +131,7 @@
       if (window._app && window._app.stopAuto) window._app.stopAuto();
       this._fit(); this.render();
     }
-    close() { this.opened = false; this.$root.hidden = true; const ed = this.editor(); if (ed) ed.focus(); }
+    close() { this._stopRun(); this.opened = false; this.$root.hidden = true; const ed = this.editor(); if (ed) ed.focus(); }
 
     _fit() {
       const W = this.$root.clientWidth, H = this.$root.clientHeight;
@@ -131,7 +143,7 @@
     _atEnd() { return this.cpu.halted || this.cpu.ip >= this.ex.instrs.length; }
     _stepOne() {
       this.prevRegs = { ...this.cpu.regs };
-      this.history.push({ snap: this.cpu.snapshot(), out: this.ex.output.length, tr: this.ex.trace.length });
+      this.history.push({ snap: this.cpu.snapshot(), out: this.ex.output.length, tr: this.ex.trace.length, vid: this.ex.video.length });
       if (this.history.length > 2000) this.history.shift();
       this.ex.step();
     }
@@ -172,7 +184,7 @@
       const h = this.history.pop();
       if (!h) { this._msg('No history'); return; }
       this.cpu.restore(h.snap);
-      this.ex.output.length = h.out; this.ex.trace.length = h.tr;
+      this.ex.output.length = h.out; this.ex.trace.length = h.tr; this.ex.video.length = h.vid;
       this.outIdx = Math.min(this.outIdx, this.ex.output.join('').length);
       this.render();
     }
@@ -199,8 +211,10 @@
 
     // ── Keyboard ──
     _onKey(e) {
-      if (!this.opened) { if (e.key === 'F1') { e.preventDefault(); this.open(); } return; }
+      if (!this.opened) { if (e.key === 'F1') { e.preventDefault(); this.open('modern'); } return; }
       if (e.ctrlKey || e.altKey || e.metaKey) return;       // leave browser shortcuts alone
+      if (this.splash) { e.preventDefault(); this.splash = false; this.render(); return; }
+      if (this.userScreen) { this._onKeyUser(e); return; }
       const k = e.key;
       if (this.help) { e.preventDefault(); this.help = false; this.render(); return; }
       switch (k) {
@@ -210,7 +224,8 @@
         case 'F3': e.preventDefault(); this.back(); return;       // history / undo
         case 'F4': e.preventDefault(); this.help = true; this.render(); return;
         case 'F5': e.preventDefault(); this._toggleBp(); return;
-        case 'F9': e.preventDefault(); this.go(null); return;     // run / go
+        case 'F6': e.preventDefault(); this.userScreen = true; this.render(); return;  // DOS program screen
+        case 'F9': e.preventDefault(); this.runUser(null); return; // run (interactive, live screen)
         case 'Enter': e.preventDefault(); this._runCmd(); return;
         case 'Backspace': e.preventDefault(); this.cmd = this.cmd.slice(0, -1); this.render(); return;
         case 'ArrowUp': e.preventDefault(); this._hist(-1); return;
@@ -357,10 +372,177 @@
       f.SF = (w >> 7) & 1; f.TF = (w >> 8) & 1; f.IF = (w >> 9) & 1; f.DF = (w >> 10) & 1; f.OF = (w >> 11) & 1;
     }
 
+    // ── Interactive run + live DOS program screen (Wave 3) ──
+    _stopRun(keepWaiting) { if (this._timer) { clearInterval(this._timer); this._timer = null; } if (!keepWaiting) this.waitingInput = false; }
+    _needsInput() {
+      const ins = this.ex.instrs[this.cpu.ip];
+      if (!ins || ins.op !== 'INT') return false;
+      const n = parseInt(String(ins.args[0] || '').replace(/h$/i, ''), 16);
+      const ah = this.cpu.getReg('AH');
+      if (n === 0x21) return [0x01, 0x07, 0x08, 0x0A].includes(ah) || (ah === 0x06 && this.cpu.getReg('DL') === 0xFF);
+      if (n === 0x16) return ah === 0x00 || ah === 0x10;
+      return false;
+    }
+    runUser(extra) {
+      this._stopRun();
+      this._timer = setInterval(() => {
+        let budget = 4000;
+        while (budget-- > 0) {
+          if (this._atEnd()) { this._stopRun(); this._msg('Program terminated'); this._after(); return; }
+          if (extra != null && this.ex.instrs[this.cpu.ip] && this.ex.instrs[this.cpu.ip].addr === extra) { this._stopRun(); this._msg('Stopped at CS:' + hx(extra)); this._after(); return; }
+          if (this.bp.has(this.cpu.ip)) { this._stopRun(); this.userScreen = false; this._msg('Breakpoint at CS:' + hx(this.ex.instrs[this.cpu.ip].addr)); this._after(); return; }
+          if (this.cpu.inputBuffer.length === 0 && this._needsInput()) { this.waitingInput = true; this.userScreen = true; this._stopRun(true); this._syncOut(); this.render(); return; }
+          try { this._stepOne(); } catch (e) { this._stopRun(); this._err(e.message); this._after(); return; }
+        }
+        this._syncOut(); this.render();
+      }, 16);
+    }
+
+    // Replay the output stream + video events into a real 80x25 DOS screen.
+    _buildConsole() {
+      const ROWS = 25, COLS = 80;
+      const grid = []; for (let r = 0; r < ROWS; r++) { const row = []; for (let c = 0; c < COLS; c++) row.push(' '); grid.push(row); }
+      let cr = 0, cc = 0;
+      const blank = () => { const row = []; for (let c = 0; c < COLS; c++) row.push(' '); return row; };
+      const scroll = () => { grid.shift(); grid.push(blank()); cr = ROWS - 1; };
+      const nl = () => { cr++; if (cr >= ROWS) scroll(); };
+      const out = this.ex.output.join(''), vid = this.ex.video; let vi = 0;
+      const applyAt = k => { while (vi < vid.length && vid[vi].at === k) { const m = vid[vi++]; if (m.type === 'cls') { for (let r = 0; r < ROWS; r++) grid[r] = blank(); cr = 0; cc = 0; } else if (m.type === 'pos') { cr = Math.min(ROWS - 1, Math.max(0, m.r | 0)); cc = Math.min(COLS - 1, Math.max(0, m.c | 0)); } } };
+      for (let i = 0; i <= out.length; i++) {
+        applyAt(i);
+        if (i === out.length) break;
+        const ch = out[i];
+        if (ch === '\r') cc = 0;
+        else if (ch === '\n') { cc = 0; nl(); }
+        else if (ch === '\b') cc = Math.max(0, cc - 1);
+        else if (ch === '\t') { cc = (cc + 8) & ~7; if (cc >= COLS) { cc = 0; nl(); } }
+        else { grid[cr][cc] = ch; cc++; if (cc >= COLS) { cc = 0; nl(); } }
+      }
+      return { grid, cr, cc };
+    }
+    _drawUserScreen(S) {
+      S.clear(GRAY, 0);                              // DOS default: light-grey on black
+      const con = this._buildConsole();
+      for (let r = 0; r < 25; r++) S.text(0, r, con.grid[r].join('').slice(0, 80), GRAY, 0);
+      let cr = con.cr, cc = con.cc;
+      if (this.waitingInput) for (let i = 0; i < this.inputLine.length && cc < 80; i++) { S.put(cc, cr, this.inputLine[i], WHITE, 0); cc++; }
+      S.put(Math.min(79, cc), cr, '█', WHITE, 0);
+      const hint = this.waitingInput ? ' type input, Enter to send ' : ' F9 Run  F6 Debug  Esc Exit ';
+      S.text(80 - hint.length, 24, hint, 0, GRAY);
+    }
+    _onKeyUser(e) {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const k = e.key;
+      if (k === 'Escape') { e.preventDefault(); this.close(); return; }
+      if (k === 'F6') { e.preventDefault(); this._stopRun(); this.userScreen = false; this.render(); return; }
+      if (k === 'F9') { e.preventDefault(); this.runUser(null); return; }
+      if (this.waitingInput) {
+        if (k === 'Enter') {
+          e.preventDefault();
+          for (const ch of this.inputLine) this.cpu.inputBuffer.push(ch.charCodeAt(0));
+          this.cpu.inputBuffer.push(13);
+          this.inputLine = ''; this.waitingInput = false; this.runUser(null); return;
+        }
+        if (k === 'Backspace') { e.preventDefault(); this.inputLine = this.inputLine.slice(0, -1); this.render(); return; }
+        if (k.length === 1) { e.preventDefault(); this.inputLine += k; this.render(); return; }
+      }
+    }
+
+    // ── AdTec boot splash (homage to the real AFD-Pro start screen) ──
+    _drawSplash(S) {
+      S.clear(GREEN, 0);
+      const L = {
+        A: [' ████ ', '██  ██', '██████', '██  ██', '██  ██'],
+        D: ['█████ ', '██  ██', '██  ██', '██  ██', '█████ '],
+        T: ['██████', '  ██  ', '  ██  ', '  ██  ', '  ██  '],
+        E: ['██████', '██    ', '█████ ', '██    ', '██████'],
+        C: [' █████', '██    ', '██    ', '██    ', ' █████'],
+      };
+      const rows = ['', '', '', '', ''];
+      for (const ch of 'ADTEC') for (let r = 0; r < 5; r++) rows[r] += L[ch][r] + ' ';
+      const bx = Math.floor((80 - rows[0].length) / 2);
+      for (let r = 0; r < 5; r++) S.text(bx, 3 + r, rows[r], GREEN, 0);
+      const lines = [['AFD-Pro', YEL], ['Advanced Fullscreen Debug', GREEN], ['Professional', GREEN],
+        ['Version 2.00', GREEN], ['Processor : 8086(8)', GREEN], ['', 0],
+        ['(C) Copyright AdTec GmbH 1998', DGRAY], ['all rights reserved', DGRAY], ['', 0],
+        ['Press any key to continue', WHITE]];
+      let y = 10;
+      for (const [t, c] of lines) { S.text(Math.floor((80 - t.length) / 2), y, t, c, 0); y++; }
+    }
+
+    // ── Authentic green-on-black AFD-Pro layout (matches the real screen) ──
+    _drawAuthentic(S) {
+      const cpu = this.cpu;
+      S.clear(GREEN, 0);
+      S.fill(0, 0, 80, 1, ' ', WHITE, DGRAY);
+      S.text(1, 0, 'DOSBox 0.74, Cpu speed:   4000 cycles, Frameskip  0, Program:     AFD', WHITE, DGRAY);
+      const R = n => hx(cpu.getReg(n));
+      const reg = (x, y, lbl, val) => { S.text(x, y, lbl, GREEN); S.text(x + 3, y, val, WHITE); };
+      reg(1, 1, 'AX', R('AX')); reg(1, 2, 'BX', R('BX')); reg(1, 3, 'CX', R('CX')); reg(1, 4, 'DX', R('DX'));
+      reg(11, 1, 'SI', R('SI')); reg(11, 2, 'DI', R('DI')); reg(11, 3, 'BP', R('BP')); reg(11, 4, 'SP', R('SP'));
+      reg(21, 1, 'CS', R('CS')); reg(21, 2, 'DS', R('DS')); reg(21, 3, 'ES', R('ES')); reg(21, 4, 'SS', R('SS'));
+      reg(31, 1, 'IP', R('IP')); reg(31, 3, 'HS', R('CS')); reg(31, 4, 'FS', R('SS'));
+      S.text(40, 1, 'Stack', GREEN);
+      for (let i = 0; i < 4; i++) { const off = (cpu.getReg('SP') + i * 2) & 0xFFFF; const v = cpu.memRead(cpu.linear('SS', off), 16); S.text(47, 1 + i, '+' + (i * 2) + ' ' + hx(v), i === 0 ? WHITE : GREEN); }
+      S.text(60, 1, 'Flags ' + hx(this._flagsWord() | 0x7000), WHITE);
+      S.text(57, 3, 'OF DF IF SF ZF AF PF CF', GREEN);
+      let vx = 58; for (const fn of ['OF', 'DF', 'IF', 'SF', 'ZF', 'AF', 'PF', 'CF']) { S.text(vx, 4, String(cpu.flags[fn]), cpu.flags[fn] ? YEL : DGRAY); vx += 3; }
+      // CMD line + separator
+      S.text(1, 5, 'CMD >' + this.cmd, GREEN); S.put(6 + this.cmd.length, 5, '█', WHITE);
+      S.text(0, 6, '─'.repeat(80), DGRAY);
+      // Code (left) + m1 (right)
+      this._drawAuthCode(S, 7, 1, 38);
+      this._drawAuthM1(S, 7, 41, this.m1, 9);
+      // m2 (bottom-left) + ascii (right)
+      this._drawAuthM2(S, 17, this.m2);
+      S.fill(0, 24, 80, 1, ' ', 0, GREEN);
+      S.text(1, 24, ' AFD-Pro 2.00   F1 Step  F2 Over  F9 Run  F6 Screen  F4 Help  Esc Exit ', 0, GREEN);
+    }
+    _drawAuthCode(S, top, x, w) {
+      const ins = this.ex.instrs, ip = this.cpu.ip, H = 10;
+      if (!ins.length) { S.text(x + 1, top + 1, '(no code — Esc to edit)', DGRAY); return; }
+      let start = Math.max(0, Math.min(ip - 3, ins.length - H));
+      for (let r = 0; r < H; r++) {
+        const i = start + r, y = top + r; if (i >= ins.length) break;
+        const o = ins[i], cur = i === ip, bp = this.bp.has(i);
+        let line = hx(o.addr) + ' 0000  ' + o.raw;
+        line = line.length > w ? line.slice(0, w) : line + ' '.repeat(w - line.length);
+        S.text(x, y, line, cur ? 0 : (bp ? RED : GREEN), cur ? GRAY : 0);
+      }
+    }
+    _drawAuthM1(S, top, x, spec, rows) {
+      const sp = this._spec(spec);
+      S.text(x, top, '1', YEL);
+      S.text(x + 9, top, '0  1  2  3  4  5  6  7', GREEN);
+      for (let r = 0; r < rows; r++) {
+        const base = (sp.off + r * 8) & 0xFFFF, lin = this.cpu.linear(sp.seg, base), y = top + 1 + r;
+        S.text(x, y, sp.seg + ':' + hx(base), GREEN);
+        let h = ''; for (let j = 0; j < 8; j++) h += hx(this.cpu.mem[(lin + j) & 0xFFFFF], 2) + ' ';
+        S.text(x + 9, y, h, WHITE);
+      }
+    }
+    _drawAuthM2(S, top, spec) {
+      const sp = this._spec(spec);
+      S.text(1, top, '2', YEL);
+      S.text(10, top, '0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F', GREEN);
+      for (let r = 0; r < 6; r++) {
+        const base = (sp.off + r * 16) & 0xFFFF, lin = this.cpu.linear(sp.seg, base), y = top + 1 + r;
+        S.text(1, y, sp.seg + ':' + hx(base), GREEN);
+        let h = '', asc = '';
+        for (let j = 0; j < 16; j++) { const b = this.cpu.mem[(lin + j) & 0xFFFFF]; h += hx(b, 2) + ' '; asc += (b >= 32 && b < 127) ? String.fromCharCode(b) : '.'; }
+        S.text(10, y, h, WHITE);
+        S.text(59, y, asc, GREEN);
+      }
+    }
+
     // ── Render the 80x25 screen ──
     render() {
       if (!this.opened) return;
-      const S = this.vga; S.clear(GRAY, BG);
+      const S = this.vga;
+      if (this.splash)     { this._drawSplash(S);     this.$screen.innerHTML = S.html(); return; }
+      if (this.userScreen) { this._drawUserScreen(S);  this.$screen.innerHTML = S.html(); return; }
+      if (this.skin === 'authentic') { this._drawAuthentic(S); this.$screen.innerHTML = S.html(); return; }
+      S.clear(GRAY, BG);
 
       // Title bar
       S.fill(0, 0, 80, 1, ' ', BG, GRAY);
@@ -463,7 +645,8 @@
         'KEYS',
         '  F1  Step into (Trace)      F2  Step over (Proceed)',
         '  F3  Step back / undo       F5  Toggle breakpoint',
-        '  F9  Run (Go)               F4/?  This help    Esc/F10  Exit',
+        '  F9  Run (live screen)      F6  DOS program screen',
+        '  F4/?  This help            Esc/F10  Exit',
         '',
         'COMMAND LINE  (numbers are hex, AFD-style)',
         '  AX=15   CF=1   FL=0060     set register / flag / flags word',

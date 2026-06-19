@@ -54,5 +54,21 @@ ok(afd.ex.output.join('').includes('Hi'), 'INT 21h/09h printed "Hi"');
 afd.back();                                     // step-back history
 ok(typeof els['afd-screen'].innerHTML === 'string' && els['afd-screen'].innerHTML.length > 0, 'back() re-renders without error');
 
+// ── Live DOS console (Wave 3) ──
+const con = afd._buildConsole();
+ok(con.grid.map(r => r.join('')).join('').includes('Hi'), 'DOS console replay shows "Hi"');
+afd.userScreen = true; afd.render();
+ok(afd.vga.html().replace(/<[^>]+>/g, '').includes('Hi'), 'user-screen view renders the program output');
+afd.userScreen = false;
+
+// ── Authentic AFD-Pro skin + AdTec splash ──
+afd.open('authentic');
+ok(afd.splash === true, 'authentic mode starts on the AdTec splash');
+ok(plain().includes('AFD-Pro') && plain().includes('AdTec'), 'splash shows AFD-Pro / AdTec');
+afd.splash = false; afd.render();               // dismiss splash → authentic screen
+ok(plain().includes('CMD'), 'authentic screen shows the CMD prompt');
+ok(plain().includes('Flags') && plain().includes('Stack'), 'authentic screen shows Flags word + Stack window');
+ok(plain().includes('CS:0100') || plain().includes('0100'), 'authentic code window lists offset 0100');
+
 console.log(`\n${fails === 0 ? '✓ AFD smoke PASSED' : '✗ ' + fails + ' AFD checks FAILED'}`);
 process.exit(fails === 0 ? 0 : 1);
