@@ -335,17 +335,183 @@ class Executor {
   // an address→index map, and prime the IP register. Lets the debugger show an
   // authentic CS:IP and resolve breakpoints / "go" targets by address.
   _assignAddresses() {
-    let off = 0x100;
     this.addrToIdx = {};
     this.codeBase  = 0x100;
+    // Pass 1 — assign addresses using each instruction's encoded length.
+    let off = 0x100;
     for (let i = 0; i < this.instrs.length; i++) {
       const ins = this.instrs[i];
       ins.addr = off;
       this.addrToIdx[off] = i;
-      off = (off + this._estLen(ins)) & 0xFFFF;
+      let bytes = null;
+      try { bytes = this._encode(ins); } catch (_) {}
+      ins.len = (bytes && bytes.length) ? bytes.length : this._estLen(ins);
+      off = (off + ins.len) & 0xFFFF;
     }
     this.codeEnd = off;
+    // Pass 2 — encode for real (targets now known) and write the machine code
+    // into the code segment at CS:0100, just like a loaded program.
+    for (const ins of this.instrs) {
+      let bytes = null;
+      try { bytes = this._encode(ins); } catch (_) {}
+      if (!bytes) bytes = [];
+      if (bytes.length < ins.len) bytes = bytes.concat(new Array(ins.len - bytes.length).fill(0x90));
+      else if (bytes.length > ins.len) bytes = bytes.slice(0, ins.len);
+      ins.bytes = bytes;
+      for (let k = 0; k < bytes.length; k++)
+        this.cpu.mem[this.cpu.linear('CS', (ins.addr + k) & 0xFFFF)] = bytes[k] & 0xFF;
+    }
     this.cpu.regs.IP = this.instrs.length ? this.instrs[0].addr : 0x100;
+  }
+
+  // ── 8086 machine-code encoder (covers the common instruction set; anything
+  //    not encoded is padded with NOPs so addresses stay consistent) ──
+  _encReg(a) {
+    if (!a) return null;
+    const u = a.toUpperCase();
+    const R8 = { AL:0,CL:1,DL:2,BL:3,AH:4,CH:5,DH:6,BH:7 };
+    const R16= { AX:0,CX:1,DX:2,BX:3,SP:4,BP:5,SI:6,DI:7 };
+    const SEG= { ES:0,CS:1,SS:2,DS:3 };
+    if (u in R8)  return { code:R8[u],  size:8,  kind:'r8'  };
+    if (u in R16) return { code:R16[u], size:16, kind:'r16' };
+    if (u in SEG) return { code:SEG[u], size:16, kind:'seg' };
+    return null;
+  }
+  _encDisp(inner) {
+    let s = inner.toUpperCase().replace(/^(CS|DS|ES|SS)\s*:\s*/, '');
+    s = s.replace(/\b([0-9A-F]+)H\b/g, (_, n) => parseInt(n, 16));
+    s = s.replace(/\b(BX|BP|SI|DI)\b/g, '0');
+    s = s.replace(/\b([A-Z_]\w*)\b/g, (_, r) => { const v = this.vars[r]; return v ? v.addr : 0; });
+    if (!/^[-\d\s+*/()]*$/.test(s)) return 0;
+    try { return (Function('return(' + (s || '0') + ')')() | 0) & 0xFFFF; } catch (_) { return 0; }
+  }
+  _encMemInfo(arg) {
+    const inner = arg.slice(arg.indexOf('[') + 1, arg.lastIndexOf(']'));
+    const U = inner.toUpperCase(), has = re => re.test(U);
+    const base = (has(/\bBX\b/) && has(/\bSI\b/)) ? 0 : (has(/\bBX\b/) && has(/\bDI\b/)) ? 1
+               : (has(/\bBP\b/) && has(/\bSI\b/)) ? 2 : (has(/\bBP\b/) && has(/\bDI\b/)) ? 3
+               : has(/\bSI\b/) ? 4 : has(/\bDI\b/) ? 5 : has(/\bBP\b/) ? 6 : has(/\bBX\b/) ? 7 : -1;
+    const disp = this._encDisp(inner);
+    if (base === -1) return { mod:0, rm:6, disp:[disp & 0xFF, (disp >> 8) & 0xFF] };       // [addr]
+    if (disp === 0 && base !== 6) return { mod:0, rm:base, disp:[] };
+    if (disp >= -128 && disp <= 127) return { mod:1, rm:base, disp:[disp & 0xFF] };
+    return { mod:2, rm:base, disp:[disp & 0xFF, (disp >> 8) & 0xFF] };
+  }
+  _modrm(reg, rmArg) {
+    const r = this._encReg(this._stripPtr(rmArg).arg);
+    if (r) return [0xC0 | (reg << 3) | r.code];
+    const m = this._encMemInfo(rmArg);
+    return [(m.mod << 6) | (reg << 3) | m.rm, ...m.disp];
+  }
+  _rel(instr, label, len) {
+    const u = (label || '').toUpperCase();
+    let tgt = null;
+    if (this.labels[u] != null) { const t = this.instrs[this.labels[u]]; tgt = t && t.addr; }
+    else { const im = this._parseImm(label); if (im != null) tgt = im; }
+    if (tgt == null || instr.addr == null) return 0;
+    return (tgt - (instr.addr + len)) & 0xFFFF;
+  }
+  _encode(instr) {
+    const op = instr.op, a = instr.args || [];
+    const imm = s => this._parseImm(s);
+    const isMem = s => s && s.includes('[');
+    const lo = v => v & 0xFF, hi = v => (v >> 8) & 0xFF;
+    const r0 = a[0] ? this._encReg(this._stripPtr(a[0]).arg) : null;
+    const r1 = a[1] ? this._encReg(this._stripPtr(a[1]).arg) : null;
+
+    const SINGLE = { NOP:[0x90],HLT:[0xF4],RET:[0xC3],RETN:[0xC3],RETF:[0xCB],IRET:[0xCF],IRETW:[0xCF],
+      CLC:[0xF8],STC:[0xF9],CMC:[0xF5],CLD:[0xFC],STD:[0xFD],CLI:[0xFA],STI:[0xFB],CBW:[0x98],CWD:[0x99],
+      PUSHF:[0x9C],POPF:[0x9D],SAHF:[0x9E],LAHF:[0x9F],PUSHA:[0x60],POPA:[0x61],XLAT:[0xD7],XLATB:[0xD7],
+      MOVSB:[0xA4],MOVSW:[0xA5],CMPSB:[0xA6],CMPSW:[0xA7],STOSB:[0xAA],STOSW:[0xAB],LODSB:[0xAC],LODSW:[0xAD],
+      SCASB:[0xAE],SCASW:[0xAF],DAA:[0x27],DAS:[0x2F],AAA:[0x37],AAS:[0x3F],AAM:[0xD4,0x0A],AAD:[0xD5,0x0A],
+      INT3:[0xCC],INTO:[0xCE],WAIT:[0x9B],FWAIT:[0x9B],LOCK:[0xF0],LEAVE:[0xC9] };
+    if (SINGLE[op]) return op === 'RET' && a[0] != null ? [0xC2, lo(imm(a[0])), hi(imm(a[0]))] : SINGLE[op].slice();
+
+    const ALU = { ADD:0,OR:1,ADC:2,SBB:3,AND:4,SUB:5,XOR:6,CMP:7 };
+    const JCC = { JO:0x70,JNO:0x71,JB:0x72,JC:0x72,JNAE:0x72,JAE:0x73,JNB:0x73,JNC:0x73,JE:0x74,JZ:0x74,
+      JNE:0x75,JNZ:0x75,JBE:0x76,JNA:0x76,JA:0x77,JNBE:0x77,JS:0x78,JNS:0x79,JP:0x7A,JPE:0x7A,JNP:0x7B,JPO:0x7B,
+      JL:0x7C,JNGE:0x7C,JGE:0x7D,JNL:0x7D,JLE:0x7E,JNG:0x7E,JG:0x7F,JNLE:0x7F };
+    const SH = { ROL:0,ROR:1,RCL:2,RCR:3,SHL:4,SAL:4,SHR:5,SAR:7 };
+    const UN = { TEST:0,NOT:2,NEG:3,MUL:4,IMUL:5,DIV:6,IDIV:7 };
+
+    switch (op) {
+      case 'INT':  { const n = imm(a[0]); return n === 3 ? [0xCC] : [0xCD, lo(n)]; }
+      case 'PUSH': if (r0 && r0.kind === 'r16') return [0x50 | r0.code];
+                   if (r0 && r0.kind === 'seg') return [[0x06,0x0E,0x16,0x1E][r0.code]];
+                   if (!isMem(a[0]) && imm(a[0]) != null) return [0x68, lo(imm(a[0])), hi(imm(a[0]))];
+                   if (isMem(a[0])) return [0xFF, ...this._modrm(6, a[0])]; break;
+      case 'POP':  if (r0 && r0.kind === 'r16') return [0x58 | r0.code];
+                   if (r0 && r0.kind === 'seg') return [[0x07,0x0F,0x17,0x1F][r0.code]];
+                   if (isMem(a[0])) return [0x8F, ...this._modrm(0, a[0])]; break;
+      case 'INC':  if (r0 && r0.kind === 'r16') return [0x40 | r0.code];
+                   if (r0 && r0.kind === 'r8')  return [0xFE, 0xC0 | r0.code];
+                   if (isMem(a[0])) return [/WORD/i.test(a[0]) ? 0xFF : 0xFE, ...this._modrm(0, a[0])]; break;
+      case 'DEC':  if (r0 && r0.kind === 'r16') return [0x48 | r0.code];
+                   if (r0 && r0.kind === 'r8')  return [0xFE, 0xC8 | r0.code];
+                   if (isMem(a[0])) return [/WORD/i.test(a[0]) ? 0xFF : 0xFE, ...this._modrm(1, a[0])]; break;
+      case 'MOV':  return this._encMov(a, r0, r1);
+      case 'LEA':  if (r0 && isMem(a[1])) return [0x8D, ...this._modrm(r0.code, a[1])]; break;
+      case 'XCHG': if (r0 && r1 && r0.kind === 'r16' && r1.code === 0) return [0x90 | r0.code];
+                   if (r0 && r1 && r1.kind === 'r16' && r0.code === 0) return [0x90 | r1.code];
+                   if (r0 && r1) return [r0.size === 8 ? 0x86 : 0x87, 0xC0 | (r1.code << 3) | r0.code]; break;
+      case 'JMP':  if (/\bFAR\b/i.test(a[0])) break; return [0xE9, lo(this._rel(instr, a[0].replace(/\bPTR\b/i,'').trim(), 3)), hi(this._rel(instr, a[0].replace(/\bPTR\b/i,'').trim(), 3))];
+      case 'CALL': if (/\bFAR\b/i.test(a[0])) break; return [0xE8, lo(this._rel(instr, a[0], 3)), hi(this._rel(instr, a[0], 3))];
+      case 'LOOP':   return [0xE2, lo(this._rel(instr, a[0], 2))];
+      case 'LOOPE': case 'LOOPZ':  return [0xE1, lo(this._rel(instr, a[0], 2))];
+      case 'LOOPNE': case 'LOOPNZ':return [0xE0, lo(this._rel(instr, a[0], 2))];
+      case 'JCXZ':   return [0xE3, lo(this._rel(instr, a[0], 2))];
+    }
+    if (ALU[op] != null) return this._encAlu(ALU[op], a, r0, r1);
+    if (JCC[op] != null) return [JCC[op], lo(this._rel(instr, a[0], 2))];
+    if (SH[op]  != null) return this._encShift(SH[op], a, r0);
+    if (op === 'TEST')   return this._encTest(a, r0, r1);
+    if (UN[op]  != null) return this._encUnary(UN[op], a, r0);
+    return null;   // unknown → caller pads with NOPs
+  }
+  _encMov(a, r0, r1) {
+    const imm = s => this._parseImm(s), lo = v => v & 0xFF, hi = v => (v >> 8) & 0xFF, isMem = s => s && s.includes('[');
+    if (r0 && r1) {
+      if (r0.kind === 'seg') return [0x8E, 0xC0 | (r0.code << 3) | r1.code];
+      if (r1.kind === 'seg') return [0x8C, 0xC0 | (r1.code << 3) | r0.code];
+      return [r0.size === 8 ? 0x88 : 0x89, 0xC0 | (r1.code << 3) | r0.code];
+    }
+    if (r0 && !isMem(a[1]) && imm(a[1]) != null) { const v = imm(a[1]); return r0.size === 8 ? [0xB0 | r0.code, lo(v)] : [0xB8 | r0.code, lo(v), hi(v)]; }
+    if (r0 && this.vars[(a[1] || '').toUpperCase()]) { const v = this.vars[a[1].toUpperCase()].addr; return [0xB8 | r0.code, lo(v), hi(v)]; }
+    if (r0 && isMem(a[1])) return [r0.size === 8 ? 0x8A : 0x8B, ...this._modrm(r0.code, a[1])];
+    if (r1 && isMem(a[0])) return [r1.size === 8 ? 0x88 : 0x89, ...this._modrm(r1.code, a[0])];
+    if (isMem(a[0]) && imm(a[1]) != null) { const v = imm(a[1]); const word = /WORD/i.test(a[0]) || v > 0xFF || v < -128; return word ? [0xC7, ...this._modrm(0, a[0]), lo(v), hi(v)] : [0xC6, ...this._modrm(0, a[0]), lo(v)]; }
+    return null;
+  }
+  _encAlu(grp, a, r0, r1) {
+    const imm = s => this._parseImm(s), lo = v => v & 0xFF, hi = v => (v >> 8) & 0xFF, isMem = s => s && s.includes('[');
+    if (r0 && r1) return [(grp << 3) | (r0.size === 8 ? 0 : 1), 0xC0 | (r1.code << 3) | r0.code];
+    if (r0 && isMem(a[1])) return [(grp << 3) | (r0.size === 8 ? 2 : 3), ...this._modrm(r0.code, a[1])];
+    if (r1 && isMem(a[0])) return [(grp << 3) | (r1.size === 8 ? 0 : 1), ...this._modrm(r1.code, a[0])];
+    if (r0 && imm(a[1]) != null) {
+      const v = imm(a[1]);
+      if (r0.code === 0 && r0.kind !== 'seg') return r0.size === 8 ? [(grp << 3) | 0x04, lo(v)] : [(grp << 3) | 0x05, lo(v), hi(v)];
+      return r0.size === 8 ? [0x80, 0xC0 | (grp << 3) | r0.code, lo(v)] : [0x81, 0xC0 | (grp << 3) | r0.code, lo(v), hi(v)];
+    }
+    if (isMem(a[0]) && imm(a[1]) != null) { const v = imm(a[1]); const word = /WORD/i.test(a[0]) || v > 0xFF || v < -128; return word ? [0x81, ...this._modrm(grp, a[0]), lo(v), hi(v)] : [0x80, ...this._modrm(grp, a[0]), lo(v)]; }
+    return null;
+  }
+  _encUnary(grp, a, r0) {
+    if (r0) return [r0.size === 8 ? 0xF6 : 0xF7, 0xC0 | (grp << 3) | r0.code];
+    if (a[0] && a[0].includes('[')) return [/WORD/i.test(a[0]) ? 0xF7 : 0xF6, ...this._modrm(grp, a[0])];
+    return null;
+  }
+  _encTest(a, r0, r1) {
+    const imm = s => this._parseImm(s), lo = v => v & 0xFF, hi = v => (v >> 8) & 0xFF;
+    if (r0 && r1) return [r0.size === 8 ? 0x84 : 0x85, 0xC0 | (r1.code << 3) | r0.code];
+    if (r0 && imm(a[1]) != null) { const v = imm(a[1]); return r0.size === 8 ? [0xF6, 0xC0 | r0.code, lo(v)] : [0xF7, 0xC0 | r0.code, lo(v), hi(v)]; }
+    return null;
+  }
+  _encShift(grp, a, r0) {
+    if (!r0) { if (a[0] && a[0].includes('[')) return [/WORD/i.test(a[0]) ? 0xD1 : 0xD0, ...this._modrm(grp, a[0])]; return null; }
+    const w = r0.size === 8 ? 0 : 1, cnt = a[1];
+    if (!cnt || cnt === '1') return [0xD0 | w, 0xC0 | (grp << 3) | r0.code];
+    if (cnt.toUpperCase() === 'CL') return [0xD2 | w, 0xC0 | (grp << 3) | r0.code];
+    return [0xC0 | w, 0xC0 | (grp << 3) | r0.code, (this._parseImm(cnt) || 0) & 0xFF];
   }
 
   // Estimated encoded length (bytes) — plausible, monotonic addresses for the

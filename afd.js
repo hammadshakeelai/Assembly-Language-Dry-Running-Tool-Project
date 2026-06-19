@@ -135,7 +135,8 @@
 
     _fit() {
       const W = this.$root.clientWidth, H = this.$root.clientHeight;
-      const fs = Math.max(7, Math.min(W / (80 * 0.62), H / (25 * 1.18)));
+      // 0.97 safety margin so the 80th column never sits flush against the edge.
+      const fs = Math.max(7, Math.min(W / (80 * 0.62), H / (25 * 1.18)) * 0.97);
       this.$screen.style.fontSize = fs + 'px';
     }
 
@@ -451,6 +452,7 @@
     // ── AdTec boot splash (homage to the real AFD-Pro start screen) ──
     _drawSplash(S) {
       S.clear(GREEN, 0);
+      // Big block "AdTec" logo (homage to the real slanted logo)
       const L = {
         A: [' ████ ', '██  ██', '██████', '██  ██', '██  ██'],
         D: ['█████ ', '██  ██', '██  ██', '██  ██', '█████ '],
@@ -460,14 +462,21 @@
       };
       const rows = ['', '', '', '', ''];
       for (const ch of 'ADTEC') for (let r = 0; r < 5; r++) rows[r] += L[ch][r] + ' ';
-      const bx = Math.floor((80 - rows[0].length) / 2);
-      for (let r = 0; r < 5; r++) S.text(bx, 3 + r, rows[r], GREEN, 0);
-      const lines = [['AFD-Pro', YEL], ['Advanced Fullscreen Debug', GREEN], ['Professional', GREEN],
-        ['Version 2.00', GREEN], ['Processor : 8086(8)', GREEN], ['', 0],
-        ['(C) Copyright AdTec GmbH 1998', DGRAY], ['all rights reserved', DGRAY], ['', 0],
-        ['Press any key to continue', WHITE]];
-      let y = 10;
-      for (const [t, c] of lines) { S.text(Math.floor((80 - t.length) / 2), y, t, c, 0); y++; }
+      for (let r = 0; r < 5; r++) S.text(5, 3 + r, rows[r], GREEN, 0);
+      // Bordered info box (centre-right)
+      const bx = 41, by = 11, bw = 35, bh = 8;
+      for (let i = 0; i < bw; i++) { S.put(bx + i, by, '═', GREEN, 0); S.put(bx + i, by + bh - 1, '═', GREEN, 0); }
+      for (let j = 1; j < bh - 1; j++) { S.put(bx, by + j, '║', GREEN, 0); S.put(bx + bw - 1, by + j, '║', GREEN, 0); }
+      S.put(bx, by, '╔', GREEN, 0); S.put(bx + bw - 1, by, '╗', GREEN, 0);
+      S.put(bx, by + bh - 1, '╚', GREEN, 0); S.put(bx + bw - 1, by + bh - 1, '╝', GREEN, 0);
+      const info = [['AFD-Pro', YEL], ['Advanced Fullscreen Debug', GREEN], ['Professional', GREEN],
+        ['Version 2.00', GREEN], ['Processor : 8086', GREEN]];
+      for (let i = 0; i < info.length; i++) { const [t, c] = info[i]; S.text(bx + Math.floor((bw - t.length) / 2), by + 1 + i, t, c, 0); }
+      // Copyright (bottom-right) + prompt (bottom-left), like the real screen
+      const c1 = '(C) Copyright AdTec GmbH  1990', c2 = 'all rights reserved';
+      S.text(78 - c1.length, 21, c1, GRAY, 0);
+      S.text(78 - c2.length, 22, c2, GRAY, 0);
+      S.text(1, 24, 'Press any key to continue', GREEN, 0);
     }
 
     // ── Authentic green-on-black AFD-Pro layout (matches the real screen) ──
@@ -484,28 +493,39 @@
       reg(31, 1, 'IP', R('IP')); reg(31, 3, 'HS', R('CS')); reg(31, 4, 'FS', R('SS'));
       S.text(40, 1, 'Stack', GREEN);
       for (let i = 0; i < 4; i++) { const off = (cpu.getReg('SP') + i * 2) & 0xFFFF; const v = cpu.memRead(cpu.linear('SS', off), 16); S.text(47, 1 + i, '+' + (i * 2) + ' ' + hx(v), i === 0 ? WHITE : GREEN); }
-      S.text(60, 1, 'Flags ' + hx(this._flagsWord() | 0x7000), WHITE);
+      S.text(60, 1, 'Flags ' + hx(this._flagsWord() | 0x7002), WHITE);   // 8086 reserved bits 1,12-14 = 1
       S.text(57, 3, 'OF DF IF SF ZF AF PF CF', GREEN);
       let vx = 58; for (const fn of ['OF', 'DF', 'IF', 'SF', 'ZF', 'AF', 'PF', 'CF']) { S.text(vx, 4, String(cpu.flags[fn]), cpu.flags[fn] ? YEL : DGRAY); vx += 3; }
-      // CMD line + separator
+      // CMD line
       S.text(1, 5, 'CMD >' + this.cmd, GREEN); S.put(6 + this.cmd.length, 5, '█', WHITE);
-      S.text(0, 6, '─'.repeat(80), DGRAY);
-      // Code (left) + m1 (right)
+      // Region contents
       this._drawAuthCode(S, 7, 1, 38);
-      this._drawAuthM1(S, 7, 41, this.m1, 9);
-      // m2 (bottom-left) + ascii (right)
+      this._drawAuthM1(S, 7, 41, this.m1, 8);
       this._drawAuthM2(S, 17, this.m2);
+      // Window boundaries — single-line grey rules between every box, like the real AFD
+      const LN = DGRAY;                                               // grey
+      for (let y = 1; y <= 4; y++) S.put(38, y, '│', LN, 0);          // registers │ stack+flags
+      S.text(0, 6, '─'.repeat(80), LN); S.put(38, 6, '┴', LN); S.put(39, 6, '┬', LN);
+      for (let y = 7; y <= 15; y++) S.put(39, y, '│', LN, 0);         // code │ m1
+      S.text(0, 16, '─'.repeat(80), LN); S.put(39, 16, '┴', LN); S.put(58, 16, '┬', LN);
+      for (let y = 17; y <= 22; y++) S.put(58, y, '│', LN, 0);        // m2 │ ascii
+      // Reserved error / message line — red bar on error, cyan for status
+      const last = this.log[this.log.length - 1];
+      if (last && last.c === RED) { S.fill(0, 23, 80, 1, ' ', WHITE, RED); S.text(1, 23, ('ERROR: ' + last.t.replace(/^!\s*/, '')).slice(0, 78), WHITE, RED); }
+      else if (last) S.text(1, 23, last.t.slice(0, 78), CYAN, 0);
+      // Status bar (real AFD F-key labels)
       S.fill(0, 24, 80, 1, ' ', 0, GREEN);
-      S.text(1, 24, ' AFD-Pro 2.00   F1 Step  F2 Over  F9 Run  F6 Screen  F4 Help  Esc Exit ', 0, GREEN);
+      S.text(1, 24, ' 1 Step  2 ProcStep  3 Retrieve  4 Help  5 BRK  6 Screen  9 Run  Esc Exit ', 0, GREEN);
     }
     _drawAuthCode(S, top, x, w) {
-      const ins = this.ex.instrs, ip = this.cpu.ip, H = 10;
+      const ins = this.ex.instrs, ip = this.cpu.ip, H = 9;
       if (!ins.length) { S.text(x + 1, top + 1, '(no code — Esc to edit)', DGRAY); return; }
       let start = Math.max(0, Math.min(ip - 3, ins.length - H));
       for (let r = 0; r < H; r++) {
         const i = start + r, y = top + r; if (i >= ins.length) break;
         const o = ins[i], cur = i === ip, bp = this.bp.has(i);
-        let line = hx(o.addr) + ' 0000  ' + o.raw;
+        const bytes = (o.bytes || []).map(v => hx(v, 2)).join('');   // real machine code
+        let line = hx(o.addr) + ' ' + bytes.padEnd(12).slice(0, 12) + ' ' + o.raw;
         line = line.length > w ? line.slice(0, w) : line + ' '.repeat(w - line.length);
         S.text(x, y, line, cur ? 0 : (bp ? RED : GREEN), cur ? GRAY : 0);
       }
@@ -525,7 +545,7 @@
       const sp = this._spec(spec);
       S.text(1, top, '2', YEL);
       S.text(10, top, '0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F', GREEN);
-      for (let r = 0; r < 6; r++) {
+      for (let r = 0; r < 5; r++) {
         const base = (sp.off + r * 16) & 0xFFFF, lin = this.cpu.linear(sp.seg, base), y = top + 1 + r;
         S.text(1, y, sp.seg + ':' + hx(base), GREEN);
         let h = '', asc = '';
@@ -539,6 +559,9 @@
     render() {
       if (!this.opened) return;
       const S = this.vga;
+      // Match the element background to the active skin so the line-height
+      // gaps between rows don't show a contrasting colour.
+      this.$screen.style.background = (this.skin === 'authentic' || this.userScreen || this.splash) ? '#000000' : '#0000AA';
       if (this.splash)     { this._drawSplash(S);     this.$screen.innerHTML = S.html(); return; }
       if (this.userScreen) { this._drawUserScreen(S);  this.$screen.innerHTML = S.html(); return; }
       if (this.skin === 'authentic') { this._drawAuthentic(S); this.$screen.innerHTML = S.html(); return; }
