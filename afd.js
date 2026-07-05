@@ -49,13 +49,13 @@
     }
     text(x, y, s, f, b) { s = String(s); for (let i = 0; i < s.length; i++) this.put(x + i, y, s[i], f, b); }
     fill(x, y, w, h, c, f, b) { for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) this.put(x + i, y + j, c, f, b); }
-    box(x, y, w, h, f, title, tf) {
+    box(x, y, w, h, f, title, tf, b = BG) {
       const H = '═', V = '║', TL = '╔', TR = '╗', BL = '╚', BR = '╝';
-      for (let i = 1; i < w - 1; i++) { this.put(x + i, y, H, f, BG); this.put(x + i, y + h - 1, H, f, BG); }
-      for (let j = 1; j < h - 1; j++) { this.put(x, y + j, V, f, BG); this.put(x + w - 1, y + j, V, f, BG); }
-      this.put(x, y, TL, f, BG); this.put(x + w - 1, y, TR, f, BG);
-      this.put(x, y + h - 1, BL, f, BG); this.put(x + w - 1, y + h - 1, BR, f, BG);
-      if (title) { this.put(x + 2, y, ' ', f, BG); this.text(x + 3, y, title, tf == null ? f : tf, BG); this.put(x + 3 + title.length, y, ' ', f, BG); }
+      for (let i = 1; i < w - 1; i++) { this.put(x + i, y, H, f, b); this.put(x + i, y + h - 1, H, f, b); }
+      for (let j = 1; j < h - 1; j++) { this.put(x, y + j, V, f, b); this.put(x + w - 1, y + j, V, f, b); }
+      this.put(x, y, TL, f, b); this.put(x + w - 1, y, TR, f, b);
+      this.put(x, y + h - 1, BL, f, b); this.put(x + w - 1, y + h - 1, BR, f, b);
+      if (title) { this.put(x + 2, y, ' ', f, b); this.text(x + 3, y, title, tf == null ? f : tf, b); this.put(x + 3 + title.length, y, ' ', f, b); }
     }
     html() {
       let out = '';
@@ -495,12 +495,18 @@
       S.clear(GREEN, 0);
       S.fill(0, 0, 80, 1, ' ', WHITE, DGRAY);
       S.text(1, 0, 'DOSBox 0.74, Cpu speed:   3000 cycles, Frameskip  0, Program:     AFD', WHITE, DGRAY);
-      const R = n => hx(cpu.getReg(n));
-      const reg = (x, y, lbl, val) => { S.text(x, y, lbl, GREEN); S.text(x + 3, y, val, WHITE); };
-      reg(1, 1, 'AX', R('AX')); reg(1, 2, 'BX', R('BX')); reg(1, 3, 'CX', R('CX')); reg(1, 4, 'DX', R('DX'));
-      reg(11, 1, 'SI', R('SI')); reg(11, 2, 'DI', R('DI')); reg(11, 3, 'BP', R('BP')); reg(11, 4, 'SP', R('SP'));
-      reg(21, 1, 'CS', R('CS')); reg(21, 2, 'DS', R('DS')); reg(21, 3, 'ES', R('ES')); reg(21, 4, 'SS', R('SS'));
-      reg(31, 1, 'IP', R('IP')); reg(31, 3, 'HS', R('CS')); reg(31, 4, 'FS', R('SS'));
+      const pr = this.prevRegs || {};
+      const reg = (x, y, name) => {                       // value turns yellow when it changed this step
+        S.text(x, y, name, GREEN);
+        const v = cpu.getReg(name), ch = pr[name] !== undefined && pr[name] !== v;
+        S.text(x + 3, y, hx(v), ch ? YEL : WHITE);
+      };
+      reg(1, 1, 'AX'); reg(1, 2, 'BX'); reg(1, 3, 'CX'); reg(1, 4, 'DX');
+      reg(11, 1, 'SI'); reg(11, 2, 'DI'); reg(11, 3, 'BP'); reg(11, 4, 'SP');
+      reg(21, 1, 'CS'); reg(21, 2, 'DS'); reg(21, 3, 'ES'); reg(21, 4, 'SS');
+      reg(31, 1, 'IP');
+      S.text(31, 3, 'HS', GREEN); S.text(34, 3, hx(cpu.getReg('CS')), WHITE);
+      S.text(31, 4, 'FS', GREEN); S.text(34, 4, hx(cpu.getReg('SS')), WHITE);
       S.text(40, 1, 'Stack', GREEN);
       for (let i = 0; i < 4; i++) { const off = (cpu.getReg('SP') + i * 2) & 0xFFFF; const v = cpu.memRead(cpu.linear('SS', off), 16); S.text(47, 1 + i, '+' + (i * 2) + ' ' + hx(v), i === 0 ? WHITE : GREEN); }
       S.text(60, 1, 'Flags ', GREEN); S.text(66, 1, hx(this._flagsWord() | 0x7002), YEL);  // 8086 reserved bits 1,12-14 = 1
@@ -519,6 +525,7 @@
       const LN = DGRAY;
       for (let y = 1; y <= 4; y++) S.put(38, y, '│', LN, 0);          // registers │ stack+flags
       S.text(0, 6, '─'.repeat(39), LN); S.put(38, 6, '┴', LN); S.put(39, 6, '┐', LN);
+      S.text(34, 6, '─' + hx(this.cpu.mem[this._spec(this.m1).linear] || 0, 2) + '─', GRAY, 0);  // ─XX─ tag
       for (let y = 7; y <= 15; y++) S.put(39, y, '│', LN, 0);         // code │ m1
       S.text(0, 16, '─'.repeat(80), LN); S.put(39, 16, '┴', LN); S.put(58, 16, '┬', LN);
       for (let y = 17; y <= 22; y++) S.put(58, y, '│', LN, 0);        // m2 │ ascii
@@ -542,26 +549,31 @@
       }
     }
     _drawAuthM1(S, top, x, spec, rows) {
-      const sp = this._spec(spec);
+      const sp = this._spec(spec), rowBase = sp.off & ~7;     // align to 8-byte paragraph
       S.text(x, top, '1', YEL);
       S.text(x + 9, top, '0  1  2  3  4  5  6  7', GREEN);
       for (let r = 0; r < rows; r++) {
-        const base = (sp.off + r * 8) & 0xFFFF, lin = this.cpu.linear(sp.seg, base), y = top + 1 + r;
-        S.text(x, y, sp.seg + ':' + hx(base), GREEN);
-        let h = ''; for (let j = 0; j < 8; j++) h += hx(this.cpu.mem[(lin + j) & 0xFFFFF], 2) + ' ';
-        S.text(x + 9, y, h, WHITE);
+        const off = (rowBase + r * 8) & 0xFFFF, lin = this.cpu.linear(sp.seg, off), y = top + 1 + r;
+        S.text(x, y, sp.seg + ':' + hx(off), GREEN);
+        for (let j = 0; j < 8; j++) {
+          const b = this.cpu.mem[(lin + j) & 0xFFFFF];
+          S.text(x + 9 + j * 3, y, hx(b, 2), ((off + j) & 0xFFFF) === sp.off ? YEL : WHITE);  // cursor byte
+        }
       }
     }
     _drawAuthM2(S, top, spec) {
-      const sp = this._spec(spec);
+      const sp = this._spec(spec), rowBase = sp.off & ~15;    // align to 16-byte paragraph
       S.text(1, top, '2', YEL);
       S.text(10, top, '0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F', GREEN);
       for (let r = 0; r < 5; r++) {
-        const base = (sp.off + r * 16) & 0xFFFF, lin = this.cpu.linear(sp.seg, base), y = top + 1 + r;
-        S.text(1, y, sp.seg + ':' + hx(base), GREEN);
-        let h = '', asc = '';
-        for (let j = 0; j < 16; j++) { const b = this.cpu.mem[(lin + j) & 0xFFFFF]; h += hx(b, 2) + ' '; asc += cp(b); }
-        S.text(10, y, h, WHITE);
+        const off = (rowBase + r * 16) & 0xFFFF, lin = this.cpu.linear(sp.seg, off), y = top + 1 + r;
+        S.text(1, y, sp.seg + ':' + hx(off), GREEN);
+        let asc = '';
+        for (let j = 0; j < 16; j++) {
+          const b = this.cpu.mem[(lin + j) & 0xFFFFF];
+          S.text(10 + j * 3, y, hx(b, 2), ((off + j) & 0xFFFF) === sp.off ? YEL : WHITE);
+          asc += cp(b);
+        }
         S.text(59, y, asc, GREEN);
       }
     }
