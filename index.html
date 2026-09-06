@@ -32,6 +32,7 @@
     <div class="ctrl-group">
       <button id="btn-afd"     class="btn afd-launch" title="Lock code into CS:0100 and open the AFD debugger screen">🐞 AFD Debug (F1)</button>
       <button id="btn-afd2"    class="btn afd-launch" title="Open the authentic green-on-black AFD-Pro screen (with AdTec splash)">🖥 Real AFD</button>
+      <button id="btn-dosbox"  class="btn dosbox-launch" title="Compile with real NASM and launch real DOSBox with AFD.EXE on your desktop">⚡ Real DOSBox AFD</button>
       <button id="btn-example" class="btn small">Load Example</button>
       <button id="btn-clear"   class="btn small danger">Clear</button>
     </div>
@@ -102,9 +103,22 @@
     </div><!-- /right-col -->
   </div><!-- /main-layout -->
 
-  <!-- ── AFD full-screen debugger (80x25 DOS text, scaled to fit) ── -->
+  <!-- ── AFD debugger (authentic DOSBox window or fullscreen text mode) ── -->
   <div id="afd-root" hidden>
-    <div id="afd-screen"></div>
+    <div id="dosbox-frame" class="dosbox-window">
+      <div id="dosbox-titlebar" class="dosbox-titlebar">
+        <div class="dosbox-title-left">
+          <div class="dosbox-icon-box"><span class="dosbox-icon-top">DOS</span><span class="dosbox-icon-bot">BOX</span></div>
+          <span class="dosbox-title-text" id="dosbox-title-text">DOSBox 0.74-3, Cpu speed:   3000 cycles, Frameskip  0, Program:     AFD</span>
+        </div>
+        <div class="dosbox-window-controls">
+          <button type="button" class="dosbox-ctrl-btn" id="dosbox-btn-min" title="Minimize / Exit (Esc)">_</button>
+          <button type="button" class="dosbox-ctrl-btn" id="dosbox-btn-max" title="Toggle Fullscreen (Alt+Enter)">□</button>
+          <button type="button" class="dosbox-ctrl-btn dosbox-close-btn" id="dosbox-btn-close" title="Close (Esc)">✕</button>
+        </div>
+      </div>
+      <div id="afd-screen"></div>
+    </div>
   </div>
 
   <script src="app.js"></script>
