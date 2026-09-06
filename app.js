@@ -122,7 +122,28 @@ class CPU {
     }
   }
 
-  // ── Memory ──  (addresses here are LINEAR/physical 20-bit; callers segment first)
+  // ── Segment-aware Memory access with 16-bit offset wraparound ──
+  segRead(seg, off, size = 16) {
+    off &= 0xFFFF;
+    const a0 = this.linear(seg, off);
+    if (size === 8) return this.mem[a0];
+    const a1 = this.linear(seg, (off + 1) & 0xFFFF);
+    return this.mem[a0] | (this.mem[a1] << 8);
+  }
+
+  segWrite(seg, off, val, size = 16) {
+    off &= 0xFFFF;
+    const a0 = this.linear(seg, off);
+    if (size === 8) {
+      this.mem[a0] = val & 0xFF;
+    } else {
+      const a1 = this.linear(seg, (off + 1) & 0xFFFF);
+      this.mem[a0] = val & 0xFF;
+      this.mem[a1] = (val >> 8) & 0xFF;
+    }
+  }
+
+  // ── Linear Memory ──  (addresses here are physical 20-bit)
   memRead(addr, size = 16) {
     addr &= 0xFFFFF;
     return size === 8 ? this.mem[addr] : (this.mem[addr] | (this.mem[(addr + 1) & 0xFFFFF] << 8));
@@ -137,13 +158,13 @@ class CPU {
     }
   }
 
-  // ── Stack ──  (always SS:SP)
+  // ── Stack ──  (always SS:SP, with 16-bit offset wraparound)
   push(val) {
     this.regs.SP = (this.regs.SP - 2) & 0xFFFF;
-    this.memWrite(this.linear('SS', this.regs.SP), val, 16);
+    this.segWrite('SS', this.regs.SP, val, 16);
   }
   pop() {
-    const val = this.memRead(this.linear('SS', this.regs.SP), 16);
+    const val = this.segRead('SS', this.regs.SP, 16);
     this.regs.SP = (this.regs.SP + 2) & 0xFFFF;
     return val;
   }
@@ -383,7 +404,7 @@ class Executor {
     s = s.replace(/\b(BX|BP|SI|DI)\b/g, '0');
     s = s.replace(/\b([A-Z_]\w*)\b/g, (_, r) => { const v = this.vars[r]; return v ? v.addr : 0; });
     if (!/^[-\d\s+*/()]*$/.test(s)) return 0;
-    try { return (Function('return(' + (s || '0') + ')')() | 0) & 0xFFFF; } catch (_) { return 0; }
+    return this._safeEval(s);
   }
   _encMemInfo(arg) {
     const inner = arg.slice(arg.indexOf('[') + 1, arg.lastIndexOf(']'));
@@ -577,7 +598,7 @@ class Executor {
     if (this._isMemArg(arg)) {
       const mi   = this._memInfo(arg);
       const size = ptrSize ?? 16;
-      return { value: this.cpu.memRead(mi.linear, size), size, isMem: true,
+      return { value: this.cpu.segRead(mi.seg, mi.off, size), size, isMem: true,
                addr: mi.off, seg: mi.seg, linear: mi.linear };
     }
 
@@ -610,13 +631,13 @@ class Executor {
     }
     if (this._isMemArg(arg)) {
       const mi = this._memInfo(arg);
-      this.cpu.memWrite(mi.linear, value, ptrSize ?? size ?? 16);
+      this.cpu.segWrite(mi.seg, mi.off, value, ptrSize ?? size ?? 16);
       return;
     }
     const vn = arg.toUpperCase();
     if (this.vars[vn]) {
       const v = this.vars[vn];
-      this.cpu.memWrite(this.cpu.linear('DS', v.addr), value, v.size * 8);
+      this.cpu.segWrite('DS', v.addr, value, v.size * 8);
       return;
     }
     throw new Error(`Cannot write to: ${raw}`);
@@ -656,12 +677,66 @@ class Executor {
     return this._evalAddr(inner);
   }
 
+  _safeEval(expr) {
+    let pos = 0;
+    const str = expr.replace(/\s+/g, '');
+    if (!str) return 0;
+
+    function parsePrimary() {
+      if (pos < str.length && str[pos] === '(') {
+        pos++;
+        const val = parseExpr();
+        if (pos < str.length && str[pos] === ')') pos++;
+        return val;
+      }
+      let sign = 1;
+      if (pos < str.length && str[pos] === '+') { pos++; }
+      else if (pos < str.length && str[pos] === '-') { sign = -1; pos++; }
+      const start = pos;
+      while (pos < str.length && /\d/.test(str[pos])) pos++;
+      if (start === pos) return 0;
+      return sign * parseInt(str.slice(start, pos), 10);
+    }
+
+    function parseFactor() {
+      let val = parsePrimary();
+      while (pos < str.length && (str[pos] === '*' || str[pos] === '/')) {
+        const op = str[pos++];
+        const right = parsePrimary();
+        val = op === '*' ? val * right : (right === 0 ? 0 : Math.floor(val / right));
+      }
+      return val;
+    }
+
+    function parseExpr() {
+      let val = parseFactor();
+      while (pos < str.length && (str[pos] === '+' || str[pos] === '-')) {
+        const op = str[pos++];
+        const right = parseFactor();
+        val = op === '+' ? val + right : val - right;
+      }
+      return val;
+    }
+
+    try {
+      return parseExpr() & 0xFFFF;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   _evalAddr(expr) {
+    // 8086 ModR/M addressing check: only BX, BP, SI, DI are valid base/index registers!
+    const illegalReg = expr.match(/\b(AX|AL|AH|CX|CL|CH|DX|DL|DH|SP)\b/i);
+    if (illegalReg) {
+      throw new Error(`Illegal 8086 addressing mode [${expr}]: register ${illegalReg[0].toUpperCase()} cannot be used for memory addressing. Only BX, BP, SI, DI are valid base/index registers.`);
+    }
+
     let s = expr;
     // Numeric literals → decimal, BEFORE identifier substitution.
-    s = s.replace(/\b([0-9][0-9A-Fa-f]*)[hH]\b/g, (_, n) => parseInt(n, 16).toString(10)); // 1234h / 0FFh
-    s = s.replace(/\b0[xX]([0-9A-Fa-f]+)\b/g,     (_, n) => parseInt(n, 16).toString(10)); // 0x1234
-    s = s.replace(/\b([01]+)[bB]\b/g,             (_, n) => parseInt(n, 2).toString(10));  // 1010b
+    s = s.replace(/\b([0-9][0-9A-Fa-f]*)[hH]\b/g, (_, n) => parseInt(n, 16).toString(10));
+    s = s.replace(/\b0[xX]([0-9A-Fa-f]+)\b/g,     (_, n) => parseInt(n, 16).toString(10));
+    s = s.replace(/\b([01]+)[bB]\b/g,             (_, n) => parseInt(n, 2).toString(10));
     // Registers & data symbols → their numeric value / offset.
     s = s.replace(/\b([A-Za-z_]\w*)\b/g, (_, r) => {
       if (this.cpu.isReg(r)) return this.cpu.getReg(r);
@@ -669,9 +744,8 @@ class Executor {
       if (vv) return vv.addr;
       return _;
     });
-    if (!/^[\d\s\+\-\*\/\(\)]+$/.test(s)) throw new Error(`Bad address: ${expr}`);
-    // eslint-disable-next-line no-new-func
-    return (Function('"use strict";return(' + s + ')'))() & 0xFFFF;
+    if (!/^[\d\s\+\-\*\/\(\)]+$/.test(s)) throw new Error(`Bad address expression: ${expr}`);
+    return this._safeEval(s);
   }
 
   _parseImm(s) {
@@ -686,10 +760,31 @@ class Executor {
   }
 
   _jumpTarget(label) {
-    const u = label.toUpperCase();
+    if (!label) throw new Error('Missing jump target');
+    const u = label.toUpperCase().trim();
+
+    // 1. Label name
     if (this.labels[u] !== undefined) return this.labels[u];
+
+    // 2. Register indirect: JMP AX, JMP BX, CALL DX, etc.
+    if (this.cpu.isReg(u)) {
+      const addr = this.cpu.getReg(u);
+      if (this.addrToIdx && this.addrToIdx[addr] !== undefined) return this.addrToIdx[addr];
+      throw new Error(`Cannot jump to register ${u} (value ${hex(addr)}): no instruction at this address`);
+    }
+
+    // 3. Direct numeric target: JMP 0105h, JMP 100h
     const imm = this._parseImm(label);
-    if (imm !== null) return imm;
+    if (imm !== null) {
+      if (this.addrToIdx && this.addrToIdx[imm] !== undefined) {
+        return this.addrToIdx[imm];
+      }
+      if (imm >= 0 && imm < this.instrs.length && (!this.addrToIdx || this.addrToIdx[imm] === undefined)) {
+        return imm;
+      }
+      throw new Error(`Cannot jump to address ${hex(imm)}: no instruction at this address`);
+    }
+
     throw new Error(`Unknown label: ${label}`);
   }
 
@@ -1058,8 +1153,17 @@ class Executor {
 
         // ── Control flow ──
         case 'JMP': {
-          const tgt = args[0].replace(/\bFAR\b/i, '').replace(/\bPTR\b/i, '').trim();
-          this.cpu.ip = this._jumpTarget(tgt);
+          let tgt = args[0].replace(/\bFAR\b/i, '').replace(/\bPTR\b/i, '').trim();
+          if (tgt.startsWith('[')) {
+            const addr = this.resolve(tgt).value;
+            if (this.addrToIdx && this.addrToIdx[addr] !== undefined) {
+              this.cpu.ip = this.addrToIdx[addr];
+            } else {
+              throw new Error(`Cannot jump to [${tgt}] (target ${hex(addr)}): no instruction at this address`);
+            }
+          } else {
+            this.cpu.ip = this._jumpTarget(tgt);
+          }
           jumped = true;
           note = `→ ${tgt}`;
           break;
@@ -1107,10 +1211,19 @@ class Executor {
 
         case 'CALL': {
           const far = /\bFAR\b/i.test(args[0]);
-          const tgt = args[0].replace(/\bFAR\b/i, '').replace(/\bPTR\b/i, '').trim();
+          let tgt = args[0].replace(/\bFAR\b/i, '').replace(/\bPTR\b/i, '').trim();
           if (far) this.cpu.push(this.cpu.getReg('CS'));   // far call saves CS:IP
           this.cpu.push(this.cpu.ip + 1);
-          this.cpu.ip = this._jumpTarget(tgt);
+          if (tgt.startsWith('[')) {
+            const addr = this.resolve(tgt).value;
+            if (this.addrToIdx && this.addrToIdx[addr] !== undefined) {
+              this.cpu.ip = this.addrToIdx[addr];
+            } else {
+              throw new Error(`Cannot call [${tgt}] (target ${hex(addr)}): no instruction at this address`);
+            }
+          } else {
+            this.cpu.ip = this._jumpTarget(tgt);
+          }
           jumped = true;
           note = far ? 'far call' : `ret→${this.cpu.ip - 1}`;
           break;
@@ -1673,6 +1786,7 @@ class App {
     document.getElementById('btn-stop').addEventListener('click',   () => this.stopAuto());
     document.getElementById('btn-example').addEventListener('click', () => this._showExamplePicker());
     document.getElementById('btn-clear').addEventListener('click',  () => this._clearEditor());
+    document.getElementById('btn-dosbox')?.addEventListener('click', () => this.runRealDosbox());
 
     // Auto-step toggle
     this.$autoTog.addEventListener('change', () => {
@@ -1755,7 +1869,7 @@ class App {
 
     // Save snapshot before step (cap depth — each snapshot copies 1 MB of RAM)
     this.history.push(this.cpu.snapshot());
-    if (this.history.length > 1024) this.history.shift();
+    if (this.history.length > 128) this.history.shift();
 
     const prevRegs = { ...this.cpu.regs };
 
@@ -2172,6 +2286,71 @@ class App {
   _clearEditor() {
     this.$editor.value = '';
     this.reset();
+  }
+
+  async runRealDosbox() {
+    const btn = document.getElementById('btn-dosbox');
+    const code = this.$editor.value;
+    if (!code.trim()) {
+      this._setStatus('Please enter some code first', 'error');
+      return;
+    }
+
+    const prevText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳ Assembling...';
+    }
+    this._setStatus('Assembling with NASM for DOSBox...', 'running');
+
+    try {
+      const resp = await fetch('/api/run-dosbox', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code })
+      });
+      const data = await resp.json();
+
+      if (data.ok) {
+        this._setStatus('✓ Real AFD launched in DOSBox!', 'done');
+        if (this.parsed) this.parsed.errors = [];
+        if (this.executor) this.executor.errors = [];
+        this._updateErrors();
+      } else {
+        const errMsg = data.error || 'Assembly error';
+        this._setStatus('NASM Error — check Errors tab', 'error');
+
+        const lines = errMsg.split('\n');
+        const errors = [];
+        for (const l of lines) {
+          const m = l.match(/USERPROG\.ASM:(\d+):\s*(error|warning)?:\s*(.*)/i);
+          if (m) {
+            errors.push({ lineNum: parseInt(m[1], 10), message: m[3] || l });
+          } else if (l.trim()) {
+            errors.push({ lineNum: 1, message: l.trim() });
+          }
+        }
+
+        if (!this.parsed) this.parsed = { errors: [] };
+        this.parsed.errors = errors;
+        this._updateErrors();
+
+        // Switch to Errors tab
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+        const errTab = document.querySelector('[data-pane="errors"]');
+        const errPane = document.getElementById('pane-errors');
+        if (errTab) errTab.classList.add('active');
+        if (errPane) errPane.classList.add('active');
+      }
+    } catch (e) {
+      this._setStatus('Failed to connect to local server: ' + e.message, 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = prevText || '⚡ Real DOSBox AFD';
+      }
+    }
   }
 }
 
