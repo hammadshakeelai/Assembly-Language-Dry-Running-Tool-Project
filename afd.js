@@ -25,7 +25,10 @@
     'ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»' +
     '░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀' +
     'αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ';
-  const cp = b => CP437[b & 0xFF] || ' ';
+  const cp = b => {
+    const byte = b & 0xFF;
+    return (byte >= 32 && byte <= 126) ? CP437[byte] : '.';
+  };
 
   const hx = (v, w = 4) => ((v < 0 ? v >>> 0 : v) & (w === 2 ? 0xFF : w === 5 ? 0xFFFFF : 0xFFFF))
                             .toString(16).toUpperCase().padStart(w, '0');
@@ -97,18 +100,47 @@
       this._timer = null;        // interactive run loop
       this.skin = 'modern';      // 'modern' panels | 'authentic' green AFD-Pro look
       this.splash = false;       // AdTec boot logo showing?
+      this.errMsg = '';          // Current error or message displayed on Row 7
       this._build();
     }
 
     _build() {
       this.$root = document.getElementById('afd-root');
       this.$screen = document.getElementById('afd-screen');
+      this.$frame = document.getElementById('dosbox-frame');
+      this.isFullscreen = false;
+      this.codeScroll = 0;
       window.addEventListener('keydown', e => this._onKey(e), true);
       window.addEventListener('resize', () => { if (this.opened) this._fit(); });
+      if (this.$screen) {
+        this.$screen.addEventListener('click', () => {
+          if (this.splash) {
+            this.splash = false;
+            this.render();
+          }
+        });
+      }
       const btn = document.getElementById('btn-afd');
       if (btn) btn.addEventListener('click', () => this.open('modern'));
       const btn2 = document.getElementById('btn-afd2');
       if (btn2) btn2.addEventListener('click', () => this.open('authentic'));
+
+      const btnClose = document.getElementById('dosbox-btn-close');
+      if (btnClose) btnClose.addEventListener('click', () => this.close());
+      const btnMax = document.getElementById('dosbox-btn-max');
+      if (btnMax) btnMax.addEventListener('click', () => this.toggleFullscreen());
+      const btnMin = document.getElementById('dosbox-btn-min');
+      if (btnMin) btnMin.addEventListener('click', () => this.close());
+    }
+
+    toggleFullscreen() {
+      this.isFullscreen = !this.isFullscreen;
+      if (this.$frame) {
+        if (this.isFullscreen) this.$frame.classList.add('fullscreen');
+        else this.$frame.classList.remove('fullscreen');
+      }
+      this._fit();
+      this.render();
     }
 
     editor() { return document.getElementById('editor'); }
@@ -121,11 +153,12 @@
       this.parsed = this.parser.parse(code);
       this.ex     = new Executor(this.cpu, this.parsed);   // assigns addresses + IP
       this.bp = new Set(); this.history = []; this.log = []; this.outIdx = 0;
+      this.codeScroll = 0;
       this.prevRegs = { ...this.cpu.regs };
       if (this.parsed.errors.length) {
         for (const e of this.parsed.errors) this._err(`L${e.lineNum || '?'}: ${e.message}`);
       } else {
-        this._msg(`Loaded ${this.ex.instrs.length} instr  CS:0100  DS:0200  (${this.ex.codeEnd - 0x100} code bytes)`);
+        this._msg(`Loaded ${this.ex.instrs.length} instr | CS:0100 | ${this.ex.codeEnd - 0x100}B`);
       }
     }
 
@@ -133,8 +166,14 @@
       this.skin = skin || 'modern';
       this.splash = (this.skin === 'authentic');
       this.userScreen = false; this.waitingInput = false; this.inputLine = '';
+      this.codeScroll = 0;
+      this.errMsg = '';
       this._stopRun();
       this.assemble();
+      if (this.skin === 'authentic') {
+        this.m1 = '0000';
+        this.m2 = '0000';
+      }
       this.opened = true;
       this.$root.hidden = false;
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
@@ -144,15 +183,31 @@
     close() { this._stopRun(); this.opened = false; this.$root.hidden = true; const ed = this.editor(); if (ed) ed.focus(); }
 
     _fit() {
-      const W = this.$root.clientWidth, H = this.$root.clientHeight;
-      // 0.97 safety margin so the 80th column never sits flush against the edge.
-      const fs = Math.max(7, Math.min(W / (80 * 0.62), H / (25 * 1.18)) * 0.97);
+      const isFullscreen = this.isFullscreen || false;
+      const frame = this.$frame || document.getElementById('dosbox-frame');
+      const titlebar = document.getElementById('dosbox-titlebar');
+      if (frame) {
+        if (isFullscreen || this.skin === 'modern') {
+          frame.classList.add('fullscreen');
+          if (titlebar) titlebar.style.display = this.skin === 'modern' ? 'none' : 'flex';
+        } else {
+          frame.classList.remove('fullscreen');
+          if (titlebar) titlebar.style.display = 'flex';
+        }
+      }
+
+      const W = (this.$root.clientWidth || 1024) - (isFullscreen ? 12 : 36);
+      const H = (this.$root.clientHeight || 768) - (isFullscreen ? 12 : (this.skin === 'modern' ? 24 : 64));
+      // Standard 80x25 character grid: font aspect ratio ~0.60
+      const fs = Math.max(7, Math.floor(Math.min(W / (80 * 0.60), H / 25)));
       this.$screen.style.fontSize = fs + 'px';
+      this.$screen.style.lineHeight = fs + 'px';
     }
 
     // ── Stepping ──
     _atEnd() { return this.cpu.halted || this.cpu.ip >= this.ex.instrs.length; }
     _stepOne() {
+      this.errMsg = '';
       this.prevRegs = { ...this.cpu.regs };
       this.history.push({ snap: this.cpu.snapshot(), out: this.ex.output.length, tr: this.ex.trace.length, vid: this.ex.video.length });
       if (this.history.length > 2000) this.history.shift();
@@ -216,13 +271,14 @@
       }
       this._trim();
     }
-    _msg(t) { this.log.push({ t, c: CYAN }); this._trim(); if (this.opened) this.render(); }
-    _err(t) { this.log.push({ t: '! ' + t, c: RED }); this._trim(); if (this.opened) this.render(); }
+    _msg(t) { this.errMsg = ''; this.log.push({ t, c: CYAN }); this._trim(); if (this.opened) this.render(); }
+    _err(t) { this.errMsg = t.replace(/^!\s*/, ''); this.log.push({ t: '! ' + t, c: RED }); this._trim(); if (this.opened) this.render(); }
     _trim() { if (this.log.length > 400) this.log = this.log.slice(-400); }
 
     // ── Keyboard ──
     _onKey(e) {
       if (!this.opened) { if (e.key === 'F1') { e.preventDefault(); this.open('modern'); } return; }
+      if (e.altKey && e.key === 'Enter') { e.preventDefault(); this.toggleFullscreen(); return; }
       if (e.ctrlKey || e.altKey || e.metaKey) return;       // leave browser shortcuts alone
       if (this.splash) { e.preventDefault(); this.splash = false; this.render(); return; }
       if (this.userScreen) { this._onKeyUser(e); return; }
@@ -230,13 +286,15 @@
       if (this.help) { e.preventDefault(); this.help = false; this.render(); return; }
       switch (k) {
         case 'Escape': case 'F10': e.preventDefault(); this.close(); return;
-        case 'F1': e.preventDefault(); this.trace(1); return;     // step into
-        case 'F2': e.preventDefault(); this.proceed(); return;    // step over
-        case 'F3': e.preventDefault(); this.back(); return;       // history / undo
+        case 'F1': e.preventDefault(); this.codeScroll = 0; this.trace(1); return;     // step into
+        case 'F2': e.preventDefault(); this.codeScroll = 0; this.proceed(); return;    // step over
+        case 'F3': e.preventDefault(); this.codeScroll = 0; this.back(); return;       // history / undo
         case 'F4': e.preventDefault(); this.help = true; this.render(); return;
         case 'F5': e.preventDefault(); this._toggleBp(); return;
-        case 'F6': e.preventDefault(); this.userScreen = true; this.render(); return;  // DOS program screen
-        case 'F9': e.preventDefault(); this.runUser(null); return; // run (interactive, live screen)
+        case 'F6': e.preventDefault(); this.userScreen = !this.userScreen; this.render(); return;  // toggle DOS program screen
+        case 'F7': e.preventDefault(); this.codeScroll = Math.max(-this.cpu.ip, (this.codeScroll || 0) - 1); this.render(); return; // up
+        case 'F8': e.preventDefault(); this.codeScroll = (this.codeScroll || 0) + 1; this.render(); return; // dn
+        case 'F9': e.preventDefault(); this.codeScroll = 0; this.runUser(null); return; // run (interactive, live screen)
         case 'Enter': e.preventDefault(); this._runCmd(); return;
         case 'Backspace': e.preventDefault(); this.cmd = this.cmd.slice(0, -1); this.render(); return;
         case 'ArrowUp': e.preventDefault(); this._hist(-1); return;
@@ -285,6 +343,7 @@
     _runCmd() {
       const line = this.cmd.trim();
       this.cmd = '';
+      this.errMsg = '';
       if (line) { this.cmdHist.push(line); this.histPos = this.cmdHist.length; }
       if (this.pending) { this._resolvePending(line); this.render(); return; }
       if (!line) { this.render(); return; }
@@ -309,7 +368,18 @@
         const name = asn[1].toUpperCase(), val = parseInt(asn[2], 16);
         if (name === 'FL' || name === 'FLAGS') { this._setFlags(val); this._msg('FL=' + hx(val)); return; }
         if (name in this.cpu.flags) { this.cpu.flags[name] = val ? 1 : 0; this._msg(name + '=' + this.cpu.flags[name]); return; }
-        if (this.cpu.isReg(name) || name === 'IP') { this.cpu.setReg(name === 'IP' ? 'IP' : name, val); this._msg(name + '=' + hx(this.cpu.getReg(name === 'IP' ? 'IP' : name))); return; }
+        if (this.cpu.isReg(name) || name === 'IP') {
+          this.cpu.setReg(name === 'IP' ? 'IP' : name, val);
+          if (name === 'IP') {
+            if (this.ex.addrToIdx && this.ex.addrToIdx[val] !== undefined) {
+              this.cpu.ip = this.ex.addrToIdx[val];
+            } else if (val >= 0 && val < this.ex.instrs.length) {
+              this.cpu.ip = val;
+            }
+          }
+          this._msg(name + '=' + hx(this.cpu.getReg(name === 'IP' ? 'IP' : name)));
+          return;
+        }
         this._err('Unknown register/flag: ' + name); return;
       }
 
@@ -326,8 +396,43 @@
           if (!a.length) { this._msg('Registers shown'); break; }
           const rn = a[0].toUpperCase();
           if (!(this.cpu.isReg(rn) || rn === 'IP')) { this._err('Unknown register ' + rn); break; }
-          if (a[1] != null) { this.cpu.setReg(rn, num(a[1]) || 0); this._msg(rn + '=' + hx(this.cpu.getReg(rn))); }
+          if (a[1] != null) {
+            const v = num(a[1]) || 0;
+            this.cpu.setReg(rn, v);
+            if (rn === 'IP') {
+              if (this.ex.addrToIdx && this.ex.addrToIdx[v] !== undefined) {
+                this.cpu.ip = this.ex.addrToIdx[v];
+              } else if (v >= 0 && v < this.ex.instrs.length) {
+                this.cpu.ip = v;
+              }
+            }
+            this._msg(rn + '=' + hx(this.cpu.getReg(rn)));
+          }
           else { this.pending = { type: 'reg', reg: rn }; this._msg(rn + ' ' + hx(this.cpu.getReg(rn)) + ' :'); }
+          break;
+        }
+        case 'C': { // Compare: C addr1 addr2 len
+          if (a.length < 2) { this._err('C addr1 addr2 [len]'); break; }
+          const sp1 = this._spec(a[0]), sp2 = this._spec(a[1]), len = num(a[2]) || 16;
+          let diff = -1;
+          for (let i = 0; i < len; i++) {
+            if (this.cpu.mem[(sp1.linear + i) & 0xFFFFF] !== this.cpu.mem[(sp2.linear + i) & 0xFFFFF]) { diff = i; break; }
+          }
+          if (diff === -1) this._msg(`Identical (${len} bytes)`);
+          else {
+            this.m1 = hx((sp1.off + diff) & 0xFFFF);
+            this.m2 = hx((sp2.off + diff) & 0xFFFF);
+            this._msg(`Diff at +${hx(diff, 2)} (${sp1.seg}:${hx((sp1.off+diff)&0xFFFF)} vs ${sp2.seg}:${hx((sp2.off+diff)&0xFFFF)})`);
+          }
+          break;
+        }
+        case 'CP': { // Copy: CP src dst len
+          if (a.length < 2) { this._err('CP src dst [len]'); break; }
+          const spSrc = this._spec(a[0]), spDst = this._spec(a[1]), len = num(a[2]) || 1;
+          for (let i = 0; i < len; i++) {
+            this.cpu.mem[(spDst.linear + i) & 0xFFFFF] = this.cpu.mem[(spSrc.linear + i) & 0xFFFFF];
+          }
+          this._msg(`Copied ${len} bytes`);
           break;
         }
         case 'M1': this.m1 = a.join(' ') || this.m1; break;
@@ -369,7 +474,7 @@
         case 'RELOAD': case 'LOAD': this.assemble(); break;
         case 'Q': case 'QUIT': this.close(); break;
         case '?': case 'HELP': this.help = true; break;
-        default: this._err('Unknown command: ' + c + '   (? for help)');
+        default: this.skin === 'authentic' ? this._err('Unknown command') : this._err('Unknown command: ' + c + '   (? for help)');
       }
     }
 
@@ -459,123 +564,376 @@
       }
     }
 
-    // ── AdTec boot splash (homage to the real AFD-Pro start screen) ──
+    // ── AdTec boot splash (pixel-perfect to genuine AFD-Pro start screen) ──
     _drawSplash(S) {
-      S.clear(GREEN, 0);
-      // Big block "AdTec" logo (homage to the real slanted logo)
-      const L = {
-        A: [' ████ ', '██  ██', '██████', '██  ██', '██  ██'],
-        D: ['█████ ', '██  ██', '██  ██', '██  ██', '█████ '],
-        T: ['██████', '  ██  ', '  ██  ', '  ██  ', '  ██  '],
-        E: ['██████', '██    ', '█████ ', '██    ', '██████'],
-        C: [' █████', '██    ', '██    ', '██    ', ' █████'],
-      };
-      const rows = ['', '', '', '', ''];
-      for (const ch of 'ADTEC') for (let r = 0; r < 5; r++) rows[r] += L[ch][r] + ' ';
-      for (let r = 0; r < 5; r++) S.text(5, 3 + r, rows[r], GREEN, 0);
-      // Bordered info box (centre-right)
-      const bx = 41, by = 11, bw = 35, bh = 8;
-      for (let i = 0; i < bw; i++) { S.put(bx + i, by, '═', GREEN, 0); S.put(bx + i, by + bh - 1, '═', GREEN, 0); }
-      for (let j = 1; j < bh - 1; j++) { S.put(bx, by + j, '║', GREEN, 0); S.put(bx + bw - 1, by + j, '║', GREEN, 0); }
-      S.put(bx, by, '╔', GREEN, 0); S.put(bx + bw - 1, by, '╗', GREEN, 0);
-      S.put(bx, by + bh - 1, '╚', GREEN, 0); S.put(bx + bw - 1, by + bh - 1, '╝', GREEN, 0);
-      const info = [['AFD-Pro', YEL], ['Advanced Fullscreen Debug', GREEN], ['Professional', GREEN],
-        ['Version 2.00', GREEN], ['Processor : 8086', GREEN]];
-      for (let i = 0; i < info.length; i++) { const [t, c] = info[i]; S.text(bx + Math.floor((bw - t.length) / 2), by + 1 + i, t, c, 0); }
-      // Copyright (bottom-right) + prompt (bottom-left), like the real screen
-      const c1 = '(C) Copyright AdTec GmbH  1990', c2 = 'all rights reserved';
-      S.text(78 - c1.length, 21, c1, GRAY, 0);
-      S.text(78 - c2.length, 22, c2, GRAY, 0);
-      S.text(1, 24, 'Press any key to continue', GREEN, 0);
+      const BLACK = 0, GRAY = 7, GREEN = 10, WHITE = 15;
+      S.clear(GREEN, BLACK);
+
+      const LOGO_STRIPS = [
+        '                                  ▀▀▀▀                                          ',
+        '                                  ▀▀▀▀                                          ',
+        '                     ▀  ▀▀▀▀▀▀▀▀▀ ▀▀▀▀ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ ',
+        '                   ▀▀▀  ▀▀▀▀▀▀▀▀▀ ▀▀▀▀ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ ',
+        '                 ▀▀▀▀▀            ▀▀▀▀      ▀▀▀▀                                ',
+        '               ▀▀▀▀▀▀▀            ▀▀▀▀      ▀▀▀▀                                ',
+        '             ▀▀▀▀▀▀▀▀▀            ▀▀▀▀      ▀▀▀▀      ▀▀▀▀▀▀▀         ▀▀▀▀▀▀▀   ',
+        '           ▀▀▀▀▀  ▀▀▀▀            ▀▀▀▀      ▀▀▀▀    ▀▀▀▀▀▀▀▀▀▀▀     ▀▀▀▀▀▀▀▀▀▀▀ ',
+        '         ▀▀▀▀▀    ▀▀▀▀            ▀▀▀▀      ▀▀▀▀   ▀▀▀▀     ▀▀▀▀   ▀▀▀▀         ',
+        '       ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀      ▀▀▀▀▀▀▀▀▀▀      ▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀          ',
+        '     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀    ▀▀▀▀▀▀▀▀▀▀▀▀      ▀▀▀▀   ▀▀▀▀            ▀▀▀▀         ',
+        '   ▀▀▀▀▀          ▀▀▀▀   ▀▀▀▀▀   ▀▀▀▀▀      ▀▀▀▀    ▀▀▀▀▀▀▀▀▀▀▀     ▀▀▀▀▀▀▀▀▀▀▀ ',
+        ' ▀▀▀▀▀            ▀▀▀▀  ▀▀▀▀▀     ▀▀▀▀      ▀▀▀▀      ▀▀▀▀▀▀▀         ▀▀▀▀▀▀▀   ',
+        '                         ▀▀▀▀▀   ▀▀▀▀▀                                          ',
+        '                          ▀▀▀▀▀▀▀▀▀▀▀▀                                          ',
+        '                            ▀▀▀▀▀▀▀▀▀▀                                          ',
+      ];
+
+      // Draw 16 logo strips with scanline appearance
+      for (let r = 0; r < 16; r++) {
+        const line = LOGO_STRIPS[r];
+        const maxCol = r >= 13 ? 39 : 80;
+        for (let c = 0; c < maxCol; c++) {
+          if (line[c] === '▀') S.put(c, r, '▀', GREEN, BLACK);
+        }
+      }
+
+      // Bordered info box (centre-right, rows 13..19, cols 40..78)
+      const bx = 40, by = 13, bw = 39, bh = 7;
+      for (let i = 0; i < bw; i++) {
+        S.put(bx + i, by, '═', WHITE, BLACK);
+        S.put(bx + i, by + bh - 1, '═', WHITE, BLACK);
+      }
+      for (let j = 1; j < bh - 1; j++) {
+        S.put(bx, by + j, '║', WHITE, BLACK);
+        S.put(bx + bw - 1, by + j, '║', WHITE, BLACK);
+      }
+      S.put(bx, by, '╔', WHITE, BLACK);
+      S.put(bx + bw - 1, by, '╗', WHITE, BLACK);
+      S.put(bx, by + bh - 1, '╚', WHITE, BLACK);
+      S.put(bx + bw - 1, by + bh - 1, '╝', WHITE, BLACK);
+
+      const info = [
+        'AFD-Pro',
+        'Advanced Fullscreen Debug',
+        'Professional',
+        'Version 2.00',
+        'Processor  : 80286'
+      ];
+      for (let i = 0; i < info.length; i++) {
+        const t = info[i];
+        const tx = bx + Math.floor((bw - t.length) / 2);
+        S.text(tx, by + 1 + i, t, WHITE, BLACK);
+      }
+
+      // Copyright lines centered beneath the box
+      const c1 = '(C) Copyright AdTec GmbH  1990';
+      const c2 = 'all rights reserved';
+      S.text(bx + Math.floor((bw - c1.length) / 2), 21, c1, WHITE, BLACK);
+      S.text(bx + Math.floor((bw - c2.length) / 2), 22, c2, WHITE, BLACK);
+
+      // Prompt on bottom row
+      S.text(1, 24, 'Press any key to continue', GREEN, BLACK);
     }
 
-    // ── Authentic green-on-black AFD-Pro layout (matches the real screen) ──
+    // ── Authentic green-on-black AFD-Pro layout (pixel-accurate to genuine AFD.EXE) ──
     _drawAuthentic(S) {
       const cpu = this.cpu;
-      S.clear(GREEN, 0);
-      S.fill(0, 0, 80, 1, ' ', WHITE, DGRAY);
-      S.text(1, 0, 'DOSBox 0.74, Cpu speed:   3000 cycles, Frameskip  0, Program:     AFD', WHITE, DGRAY);
+      const BLACK = 0, GRAY = 7, GREEN = 10, YEL = 14, RED = 12, WHITE = 15;
+      S.clear(GREEN, BLACK);
       const pr = this.prevRegs || {};
-      const reg = (x, y, name) => {                       // value turns yellow when it changed this step
-        S.text(x, y, name, GREEN);
-        const v = cpu.getReg(name), ch = pr[name] !== undefined && pr[name] !== v;
-        S.text(x + 3, y, hx(v), ch ? YEL : WHITE);
+
+      // Register display helper
+      const reg = (x, y, name) => {
+        S.text(x, y, name, GRAY, BLACK);
+        const v = cpu.getReg(name);
+        const ch = pr[name] !== undefined && pr[name] !== v;
+        S.text(x + 3, y, hx(v), ch ? YEL : GREEN, BLACK);
       };
-      reg(1, 1, 'AX'); reg(1, 2, 'BX'); reg(1, 3, 'CX'); reg(1, 4, 'DX');
-      reg(11, 1, 'SI'); reg(11, 2, 'DI'); reg(11, 3, 'BP'); reg(11, 4, 'SP');
-      reg(21, 1, 'CS'); reg(21, 2, 'DS'); reg(21, 3, 'ES'); reg(21, 4, 'SS');
-      reg(31, 1, 'IP');
-      S.text(31, 3, 'HS', GREEN); S.text(34, 3, hx(cpu.getReg('CS')), WHITE);
-      S.text(31, 4, 'FS', GREEN); S.text(34, 4, hx(cpu.getReg('SS')), WHITE);
-      S.text(40, 1, 'Stack', GREEN);
-      for (let i = 0; i < 4; i++) { const off = (cpu.getReg('SP') + i * 2) & 0xFFFF; const v = cpu.memRead(cpu.linear('SS', off), 16); S.text(47, 1 + i, '+' + (i * 2) + ' ' + hx(v), i === 0 ? WHITE : GREEN); }
-      S.text(60, 1, 'Flags ', GREEN); S.text(66, 1, hx(this._flagsWord() | 0x7002), YEL);  // 8086 reserved bits 1,12-14 = 1
-      S.text(57, 3, 'OF DF IF SF ZF AF PF CF', GREEN);
-      let vx = 58; for (const fn of ['OF', 'DF', 'IF', 'SF', 'ZF', 'AF', 'PF', 'CF']) { S.text(vx, 4, String(cpu.flags[fn]), cpu.flags[fn] ? YEL : DGRAY); vx += 3; }
-      // CMD line
-      S.text(1, 5, 'CMD >' + this.cmd, GREEN); S.put(6 + this.cmd.length, 5, '█', WHITE);
-      // Region contents: m1 header sits on the separator row; code below the message line
-      this._drawAuthM1(S, 6, 41, this.m1, 9);
-      this._drawAuthCode(S, 8, 1, 38);
-      this._drawAuthM2(S, 17, this.m2);
-      // Error / message line at the TOP of the code window (red on error), like real AFD
-      const last = this.log[this.log.length - 1];
-      if (last) { const red = last.c === RED; S.text(1, 7, (red ? last.t.replace(/^!\s*/, '') : last.t).slice(0, 37), red ? RED : CYAN, 0); }
-      // Window boundaries — single-line grey rules between every box
-      const LN = DGRAY;
-      for (let y = 1; y <= 4; y++) S.put(38, y, '│', LN, 0);          // registers │ stack+flags
-      S.text(0, 6, '─'.repeat(39), LN); S.put(38, 6, '┴', LN); S.put(39, 6, '┐', LN);
-      S.text(34, 6, '─' + hx(this.cpu.mem[this._spec(this.m1).linear] || 0, 2) + '─', GRAY, 0);  // ─XX─ tag
-      for (let y = 7; y <= 15; y++) S.put(39, y, '│', LN, 0);         // code │ m1
-      S.text(0, 16, '─'.repeat(80), LN); S.put(39, 16, '┴', LN); S.put(58, 16, '┬', LN);
-      for (let y = 17; y <= 22; y++) S.put(58, y, '│', LN, 0);        // m2 │ ascii
-      // Status bar (real AFD F-key labels)
-      S.fill(0, 24, 80, 1, ' ', 0, GREEN);
-      S.text(1, 24, ' 1 Step  2 ProcStep  3 Retrieve  4 Help  5 BRK  6 Screen  9 Run  Esc Exit ', 0, GREEN);
-    }
-    _drawAuthCode(S, top, x, w) {
-      const ins = this.ex.instrs, ip = this.cpu.ip, H = 8;
-      if (!ins.length) { S.text(x + 1, top + 1, '(no code — Esc to edit)', DGRAY); return; }
-      // Real-AFD scroll: short programs show from the top; longer ones keep the
-      // current instruction pinned one line from the top and scroll under it.
-      const start = ins.length <= H ? 0 : Math.max(0, ip - 1);
-      for (let r = 0; r < H; r++) {
-        const i = start + r, y = top + r; if (i >= ins.length) break;
-        const o = ins[i], cur = i === ip, bp = this.bp.has(i);
-        const bytes = (o.bytes || []).map(v => hx(v, 2)).join('');   // real machine code
-        let line = hx(o.addr) + ' ' + bytes.padEnd(12).slice(0, 12) + ' ' + o.raw;
-        line = line.length > w ? line.slice(0, w) : line + ' '.repeat(w - line.length);
-        S.text(x, y, line, cur ? 0 : (bp ? RED : GREEN), cur ? GRAY : 0);
+
+      // Row 0: AX SI CS IP Stack +0 Flags
+      reg(0, 0, 'AX'); reg(9, 0, 'SI'); reg(18, 0, 'CS'); reg(27, 0, 'IP');
+      S.text(41, 0, 'Stack', GRAY, BLACK);
+      S.text(47, 0, '+0', GRAY, BLACK);
+      const sp0 = cpu.getReg('SP');
+      const v0 = cpu.memRead(cpu.linear('SS', sp0), 16);
+      S.text(50, 0, hx(v0), GREEN, BLACK);
+      S.text(56, 0, 'Flags', GRAY, BLACK);
+      const flWord = this._flagsWord() | 0x7202; // 8086 reserved bits
+      S.text(62, 0, hx(flWord), GREEN, BLACK);
+
+      // Row 1: BX DI DS +2
+      reg(0, 1, 'BX'); reg(9, 1, 'DI'); reg(18, 1, 'DS');
+      S.text(47, 1, '+2', GRAY, BLACK);
+      const v2 = cpu.memRead(cpu.linear('SS', (sp0 + 2) & 0xFFFF), 16);
+      S.text(50, 1, hx(v2), GREEN, BLACK);
+
+      // Row 2: CX BP ES HS +4 Flags names
+      reg(0, 2, 'CX'); reg(9, 2, 'BP'); reg(18, 2, 'ES');
+      S.text(27, 2, 'HS', GRAY, BLACK); S.text(30, 2, hx(cpu.getReg('CS')), GREEN, BLACK);
+      S.text(47, 2, '+4', GRAY, BLACK);
+      const v4 = cpu.memRead(cpu.linear('SS', (sp0 + 4) & 0xFFFF), 16);
+      S.text(50, 2, hx(v4), GREEN, BLACK);
+      const flagNames = ['OF', 'DF', 'IF', 'SF', 'ZF', 'AF', 'PF', 'CF'];
+      let fx = 56;
+      for (const fn of flagNames) {
+        S.text(fx, 2, fn, GRAY, BLACK);
+        fx += 3;
       }
+
+      // Row 3: DX SP SS FS +6 Flags values
+      reg(0, 3, 'DX'); reg(9, 3, 'SP'); reg(18, 3, 'SS');
+      S.text(27, 3, 'FS', GRAY, BLACK); S.text(30, 3, hx(cpu.getReg('SS')), GREEN, BLACK);
+      S.text(47, 3, '+6', GRAY, BLACK);
+      const v6 = cpu.memRead(cpu.linear('SS', (sp0 + 6) & 0xFFFF), 16);
+      S.text(50, 3, hx(v6), GREEN, BLACK);
+      let bx = 57;
+      for (const fn of flagNames) {
+        const bit = cpu.flags[fn] ? 1 : 0;
+        S.text(bx, 3, String(bit), bit ? YEL : GREEN, BLACK);
+        bx += 3;
+      }
+
+      // Row 4: Top divider line (47 cols left, divider at col 47, 32 cols right)
+      const LN = GRAY;
+      S.put(0, 4, '┌', LN, BLACK);
+      for (let x = 1; x <= 46; x++) S.put(x, 4, '─', LN, BLACK);
+      S.put(47, 4, '┬', LN, BLACK);
+      for (let x = 48; x < 80; x++) S.put(x, 4, '─', LN, BLACK);
+
+      // Row 5: CMD line (left) & M1 Header (right)
+      S.put(0, 5, '│', LN, BLACK);
+      S.text(1, 5, 'CMD >', GREEN, BLACK);
+      const cmdStr = this.cmd.slice(0, 40);
+      S.text(6, 5, cmdStr, GREEN, BLACK);
+      S.put(6 + cmdStr.length, 5, '█', GREEN, BLACK);
+      for (let x = 7 + cmdStr.length; x < 47; x++) S.put(x, 5, ' ', GREEN, BLACK);
+      S.put(47, 5, '│', LN, BLACK);
+
+      // Right: M1 Header
+      S.put(48, 5, ' ', GREEN, BLACK);
+      S.put(49, 5, '1', BLACK, GRAY); // Inverted '1' badge
+      for (let x = 50; x < 57; x++) S.put(x, 5, ' ', GREEN, BLACK);
+      let colX = 57;
+      for (let j = 0; j < 8; j++) {
+        S.put(colX, 5, String(j), GREEN, BLACK);
+        colX += 3;
+      }
+      S.put(79, 5, ' ', GREEN, BLACK);
+
+      // Row 6: CMD bottom border with -XX- byte tag and M1 Row 0
+      S.put(0, 6, '└', LN, BLACK);
+      for (let x = 1; x < 43; x++) S.put(x, 6, '─', LN, BLACK);
+      const spM1 = this._spec(this.m1);
+      const targetByte = this.cpu.mem[spM1.linear] || 0;
+      const byteTag = '-' + hx(targetByte, 2) + '-';
+      S.text(43, 6, byteTag, GRAY, BLACK);
+      S.put(47, 6, '┤', LN, BLACK);
+      this._drawAuthM1Row(S, 6, spM1, 0);
+
+      // Row 7: Message/error line on left; M1 Row 1 on right
+      for (let x = 0; x < 47; x++) S.put(x, 7, ' ', GREEN, BLACK);
+      if (this.errMsg) {
+        const em = this.errMsg.slice(0, 39);
+        S.text(7, 7, em, RED, BLACK);
+      }
+      S.put(47, 7, '│', LN, BLACK);
+      this._drawAuthM1Row(S, 7, spM1, 1);
+
+      // Row 8: Active instruction in inverse-video across cols 0..46; M1 Row 2 on right
+      this._drawAuthActiveCode(S, 8, 47);
+      S.put(47, 8, '│', LN, BLACK);
+      this._drawAuthM1Row(S, 8, spM1, 2);
+
+      // Rows 9..15: Next 7 code disassembly instructions on left; M1 Rows 3..9 on right
+      this._drawAuthRestCode(S, 9, 7, 47);
+      for (let r = 3; r < 10; r++) {
+        const y = 6 + r;
+        S.put(47, y, '│', LN, BLACK);
+        this._drawAuthM1Row(S, y, spM1, r);
+      }
+
+      // Row 16: Separator between Code/M1 and M2
+      for (let x = 0; x <= 46; x++) S.put(x, 16, '─', LN, BLACK);
+      S.put(47, 16, '┴', LN, BLACK);
+      for (let x = 48; x <= 60; x++) S.put(x, 16, '─', LN, BLACK);
+      S.put(61, 16, '┬', LN, BLACK);
+      for (let x = 62; x < 80; x++) S.put(x, 16, '─', LN, BLACK);
+
+      // Row 17: M2 Header
+      S.put(0, 17, ' ', GRAY, BLACK);
+      S.put(1, 17, '2', BLACK, GRAY); // Inverted '2' badge
+      for (let x = 2; x < 10; x++) S.put(x, 17, ' ', GREEN, BLACK);
+      S.text(10, 17, '0  1  2  3  4  5  6  7', GREEN, BLACK);
+      S.text(33, 17, '   8  9  A  B  C  D  E  F', GREEN, BLACK);
+      S.put(59, 17, ' ', GREEN, BLACK);
+      S.put(60, 17, ' ', GREEN, BLACK);
+      S.put(61, 17, '│', LN, BLACK);
+      for (let x = 62; x < 80; x++) S.put(x, 17, ' ', GREEN, BLACK);
+
+      // Rows 18..22: 5 M2 data rows
+      this._drawAuthM2(S, 18, this.m2);
+
+      // Row 23: Bottom border closing M2
+      for (let x = 0; x <= 60; x++) S.put(x, 23, '─', LN, BLACK);
+      S.put(61, 23, '┴', LN, BLACK);
+      for (let x = 62; x < 80; x++) S.put(x, 23, '─', LN, BLACK);
+
+      // Row 24: Status bar directly beneath Row 23 (NO line between Row 23 and 24)
+      this._drawAuthStatus(S, 24);
     }
-    _drawAuthM1(S, top, x, spec, rows) {
-      const sp = this._spec(spec), rowBase = sp.off & ~7;     // align to 8-byte paragraph
-      S.text(x, top, '1', YEL);
-      S.text(x + 9, top, '0  1  2  3  4  5  6  7', GREEN);
-      for (let r = 0; r < rows; r++) {
-        const off = (rowBase + r * 8) & 0xFFFF, lin = this.cpu.linear(sp.seg, off), y = top + 1 + r;
-        S.text(x, y, sp.seg + ':' + hx(off), GREEN);
-        for (let j = 0; j < 8; j++) {
-          const b = this.cpu.mem[(lin + j) & 0xFFFFF];
-          S.text(x + 9 + j * 3, y, hx(b, 2), ((off + j) & 0xFFFF) === sp.off ? YEL : WHITE);  // cursor byte
+
+    _drawAuthActiveCode(S, y, w = 47) {
+      const BLACK = 0, GRAY = 7;
+      const ins = this.ex.instrs, ip = this.cpu.ip;
+      if (!ins.length) {
+        let line = '(no code — Esc to edit)'.padEnd(w, ' ');
+        S.text(0, y, line, BLACK, GRAY);
+        return;
+      }
+      const scroll = this.codeScroll || 0;
+      const i = Math.max(0, Math.min(ins.length - 1, ip + scroll));
+      const o = ins[i];
+      if (!o) {
+        S.text(0, y, ''.padEnd(w, ' '), BLACK, GRAY);
+        return;
+      }
+      const bytes = (o.bytes || []).map(v => hx(v, 2)).join('');
+      const addrStr = hx(o.addr);
+      const bytesStr = bytes.padEnd(8, ' ').slice(0, 8);
+      const opStr = (o.op || '').padEnd(7, ' ');
+      const argsStr = (o.args ? o.args.join(',') : '');
+      let line = addrStr + ' ' + bytesStr + '        ' + opStr + argsStr;
+      line = line.padEnd(w, ' ').slice(0, w);
+      S.text(0, y, line, BLACK, GRAY);
+    }
+
+    _drawAuthRestCode(S, top, count, w = 47) {
+      const BLACK = 0, GRAY = 7, RED = 12;
+      const ins = this.ex.instrs, ip = this.cpu.ip;
+      const scroll = this.codeScroll || 0;
+      const base = Math.max(0, ip + scroll);
+      for (let r = 0; r < count; r++) {
+        const y = top + r;
+        const i = base + 1 + r;
+        if (i >= ins.length) {
+          S.text(0, y, ''.padEnd(w, ' '), GRAY, BLACK);
+          continue;
         }
+        const o = ins[i];
+        const bp = this.bp.has(i);
+        const bytes = (o.bytes || []).map(v => hx(v, 2)).join('');
+        const addrStr = hx(o.addr);
+        const bytesStr = bytes.padEnd(8, ' ').slice(0, 8);
+        const opStr = (o.op || '').padEnd(7, ' ');
+        const argsStr = (o.args ? o.args.join(',') : '');
+        let line = addrStr + ' ' + bytesStr + '        ' + opStr + argsStr;
+        line = line.padEnd(w, ' ').slice(0, w);
+        S.text(0, y, line, bp ? RED : GRAY, BLACK);
       }
     }
-    _drawAuthM2(S, top, spec) {
-      const sp = this._spec(spec), rowBase = sp.off & ~15;    // align to 16-byte paragraph
-      S.text(1, top, '2', YEL);
-      S.text(10, top, '0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F', GREEN);
+
+    _drawAuthM1Row(S, y, spM1, rowIndex) {
+      const BLACK = 0, GRAY = 7, GREEN = 10, YEL = 14;
+      const rowBase = spM1.off & ~7;
+      const off = (rowBase + rowIndex * 8) & 0xFFFF;
+      const lin = this.cpu.linear(spM1.seg, off);
+      const isCursorRow = (spM1.off >= off && spM1.off < off + 8);
+      const addrColor = isCursorRow ? GREEN : GRAY;
+
+      // Cols 48..54: DS:0000
+      S.text(48, y, spM1.seg, GRAY, BLACK);
+      S.put(50, y, ':', addrColor, BLACK);
+      S.text(51, y, hx(off), addrColor, BLACK);
+      S.put(55, y, ' ', GREEN, BLACK);
+
+      for (let j = 0; j < 8; j++) {
+        const b = this.cpu.mem[(lin + j) & 0xFFFFF] || 0;
+        const isCursor = ((off + j) & 0xFFFF) === spM1.off;
+        S.text(56 + j * 3, y, hx(b, 2), isCursor ? YEL : GREEN, BLACK);
+        if (j < 7) S.put(58 + j * 3, y, ' ', GREEN, BLACK);
+      }
+      S.put(79, y, ' ', GREEN, BLACK);
+    }
+
+    _drawAuthM2(S, startY, spec) {
+      const BLACK = 0, GRAY = 7, GREEN = 10, YEL = 14;
+      const sp = this._spec(spec);
+      const rowBase = sp.off & ~15;
+      const LN = GRAY;
       for (let r = 0; r < 5; r++) {
-        const off = (rowBase + r * 16) & 0xFFFF, lin = this.cpu.linear(sp.seg, off), y = top + 1 + r;
-        S.text(1, y, sp.seg + ':' + hx(off), GREEN);
-        let asc = '';
-        for (let j = 0; j < 16; j++) {
-          const b = this.cpu.mem[(lin + j) & 0xFFFFF];
-          S.text(10 + j * 3, y, hx(b, 2), ((off + j) & 0xFFFF) === sp.off ? YEL : WHITE);
-          asc += cp(b);
+        const off = (rowBase + r * 16) & 0xFFFF;
+        const lin = this.cpu.linear(sp.seg, off);
+        const y = startY + r;
+        const isCursorRow = (sp.off >= off && sp.off < off + 16);
+        const addrColor = isCursorRow ? GREEN : GRAY;
+
+        S.text(0, y, sp.seg, GRAY, BLACK);
+        S.put(2, y, ':', addrColor, BLACK);
+        S.text(3, y, hx(off), addrColor, BLACK);
+        S.text(7, y, '   ', GREEN, BLACK);
+
+        // First 8 hex bytes
+        let bx1 = 10;
+        for (let j = 0; j < 8; j++) {
+          const b = this.cpu.mem[(lin + j) & 0xFFFFF] || 0;
+          const isCursor = ((off + j) & 0xFFFF) === sp.off;
+          S.text(bx1, y, hx(b, 2), isCursor ? YEL : GREEN, BLACK);
+          bx1 += 3;
         }
-        S.text(59, y, asc, GREEN);
+
+        // Second 8 hex bytes
+        S.text(33, y, '   ', GREEN, BLACK);
+        let bx2 = 36;
+        for (let j = 8; j < 16; j++) {
+          const b = this.cpu.mem[(lin + j) & 0xFFFFF] || 0;
+          const isCursor = ((off + j) & 0xFFFF) === sp.off;
+          S.text(bx2, y, hx(b, 2), isCursor ? YEL : GREEN, BLACK);
+          bx2 += 3;
+        }
+
+        // Vertical separator at col 61
+        S.put(59, y, ' ', GREEN, BLACK);
+        S.put(60, y, ' ', GREEN, BLACK);
+        S.put(61, y, '│', LN, BLACK);
+        S.put(62, y, ' ', GREEN, BLACK);
+
+        // ASCII pane
+        for (let j = 0; j < 8; j++) {
+          const b = this.cpu.mem[(lin + j) & 0xFFFFF] || 0;
+          const isCursor = ((off + j) & 0xFFFF) === sp.off;
+          S.put(63 + j, y, cp(b), isCursor ? YEL : GREEN, BLACK);
+        }
+        S.put(71, y, ' ', GREEN, BLACK);
+        for (let j = 8; j < 16; j++) {
+          const b = this.cpu.mem[(lin + j) & 0xFFFFF] || 0;
+          const isCursor = ((off + j) & 0xFFFF) === sp.off;
+          S.put(72 + (j - 8), y, cp(b), isCursor ? YEL : GREEN, BLACK);
+        }
       }
+    }
+
+    _drawAuthStatus(S, y) {
+      const BLACK = 0, GRAY = 7, WHITE = 15;
+      const buttons = [
+        { k: ' 1', l: ' Step   ' },
+        { k: ' 2', l: 'ProcStep' },
+        { k: ' 3', l: 'Retrieve' },
+        { k: ' 4', l: 'Help ON ' },
+        { k: ' 5', l: 'BRK Menu' },
+        { k: ' 6', l: '    ' },
+        { k: ' 7', l: ' up ' },
+        { k: ' 8', l: ' dn ' },
+        { k: ' 9', l: ' le ' },
+        { k: '10', l: ' ri ' },
+      ];
+      let x = 0;
+      for (const btn of buttons) {
+        S.text(x, y, btn.k, WHITE, BLACK);
+        x += btn.k.length;
+        S.text(x, y, btn.l, BLACK, GRAY);
+        x += btn.l.length;
+      }
+      while (x < 80) S.put(x++, y, ' ', WHITE, BLACK);
     }
 
     // ── Render the 80x25 screen ──
