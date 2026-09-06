@@ -1,0 +1,4 @@
+[org 0x100]
+MOV AX, 42
+MOV BX, 10
+HLT
