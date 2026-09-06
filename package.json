@@ -4,6 +4,7 @@
   "description": "8086 assembly dry-run debugger (AFD-Pro style) — headless engine (app.js) + browser UI, with a correctness test suite.",
   "private": true,
   "scripts": {
+    "start": "node serve.js",
     "test": "node tests/run.js"
   }
 }
