@@ -1,0 +1,7 @@
+DOSBox version 0.74-3
+Copyright 2002-2019 DOSBox Team, published under GNU GPL.
+---
+SDL_Init: Starting up with SDL windib video driver.
+          Try to update your video card and directx drivers!
+CONFIG:Loading primary settings from config file C:\Users\HP\Documents\GitHub\assembly-lowlevel\Assembly Language Dry Running Tool Project\afd-toolchain\compile.conf
+MIDI:Opened device:win32
